@@ -1,0 +1,39 @@
+export const PRODUCT = 'codex' as const;
+export type SessionStatus = 'active' | 'paused' | 'archived';
+export interface Session {
+  session_id: string;
+  title: string;
+  status: SessionStatus;
+  pinned: boolean;
+  cwd: string;
+  created_at: string;
+  updated_at: string;
+  rollout_path?: string;
+}
+export interface MessageReference { type:'file'|'skill'|'annotation'; label:string; path?:string; detail?:string }
+export interface Message { msg_id:string; client_id?:string; turn_id?:string; session_id:string; role:'user'|'assistant'; content:string; references?:MessageReference[]; timestamp:string; seq:number }
+export type EventType='user_message'|'assistant_delta'|'assistant_message'|'turn_started'|'turn_completed'|'turn_failed'|'command_execution'|'file_change'|'reasoning_status'|'context_compaction'|'tool_call'|'web_search'|'approval_requested'|'session_updated'|'provider_error';
+export interface BridgeEvent { id:string; type:EventType; session:string; timestamp:string; seq:number; role?:string; content?:string; metadata?:Record<string,unknown> }
+export interface SessionDetail extends Session { messages:Message[]; events:BridgeEvent[] }
+export interface AuthTokens { access_token:string; refresh_token:string; expires_in:number; device_id:string }
+export interface WsEnvelope { type:'hello'|'event'|'sync'|'error'; event?:BridgeEvent; events?:BridgeEvent[]; cursor?:number; message?:string }
+export interface PendingApproval { request_id:string; session_id:string; turn_id?:string; item_id?:string; kind:string; payload:unknown; status:'pending'; created_at:string; updated_at:string }
+export type ApprovalDecision='accept'|'decline'|'cancel';
+export interface ApprovalResolution { request_id:string;session_id:string;decision:ApprovalDecision;status:'resolved' }
+export interface SyncResponse { cursor:number; events:BridgeEvent[] }
+export interface TurnAccepted { thread_id:string; turn_id:string; status:'started'|'interrupt_requested' }
+export type ReasoningEffort='none'|'minimal'|'low'|'medium'|'high'|'xhigh';
+export type ApprovalPolicy='untrusted'|'on-failure'|'on-request'|'never';
+export type SandboxMode='read-only'|'workspace-write'|'danger-full-access';
+export interface RuntimeConfig { model?:string; effort?:ReasoningEffort; approvalPolicy?:ApprovalPolicy; sandbox?:SandboxMode }
+export interface CodexDefaults extends RuntimeConfig {}
+export type UserInput=
+  | {type:'text';text:string}
+  | {type:'image';url:string;name?:string}
+  | {type:'localImage';path:string;name?:string}
+  | {type:'skill';name:string;path:string}
+  | {type:'mention';name:string;path:string};
+export interface ModelOption { id:string;model:string;displayName:string;description?:string;isDefault?:boolean;defaultReasoningEffort?:ReasoningEffort;supportedReasoningEfforts:ReasoningEffort[];inputModalities:string[] }
+export interface SkillOption { name:string;description:string;path:string;scope?:string;enabled:boolean }
+export interface AppOption { id:string;name:string;description?:string;logoUrl?:string;isAccessible:boolean;isEnabled:boolean }
+export interface FileSearchResult { path:string;file_name:string;match_type:'file'|'directory';score:number;root:string }

@@ -1,0 +1,16 @@
+[Unit]
+Description=Codex Remote Bridge
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/codex-remote
+EnvironmentFile=/opt/codex-remote/.env
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+User=codex-remote
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

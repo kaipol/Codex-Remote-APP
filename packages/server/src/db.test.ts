@@ -1,0 +1,10 @@
+import {afterEach,describe,expect,it} from 'vitest';
+import Database from 'better-sqlite3';
+import {rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {randomUUID} from 'node:crypto';
+import {Store} from './db.js';
+let path='';
+afterEach(async()=>{if(path)await rm(path,{force:true})});
+describe('database migrations',()=>{it('upgrades the legacy approvals table without losing rows',()=>{path=join(tmpdir(),`codex-remote-${randomUUID()}.db`);const legacy=new Database(path);legacy.exec("CREATE TABLE approvals(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,resolved_at TEXT);INSERT INTO approvals VALUES('old-1','session-1','command','{}','pending','2026-01-01T00:00:00.000Z',NULL)");legacy.close();const store=new Store(path);try{expect(store.getApproval('old-1')).toMatchObject({request_id:'old-1',session_id:'session-1',kind:'command',status:'pending',updated_at:'2026-01-01T00:00:00.000Z',epoch:0});store.expireApprovalsBefore(Date.now());expect(store.getApproval('old-1')?.status).toBe('stale')}finally{store.close()}})});

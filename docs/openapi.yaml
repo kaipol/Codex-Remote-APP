@@ -1,0 +1,46 @@
+openapi: 3.1.0
+# Codex rollout history API. Discovered rollouts are the source of truth; SQLite stores overlays only.
+info: {title: Codex Remote Bridge API, version: 0.1.0, description: 自托管 CLI 会话、配对与同步 API}
+servers: [{url: http://localhost:8787}]
+security: [{bearerAuth: []}]
+paths:
+  /health:
+    get: {security: [], responses: {'200': {description: Healthy}}}
+  /api/pair/code:
+    post: {security: [], summary: 生成一次性配对码（仅 loopback 本机管理入口）, responses: {'201': {description: Pair code, content: {application/json: {schema: {$ref: '#/components/schemas/PairCode'}}}}, '403': {description: Remote generation forbidden}}}
+  /api/pair/request:
+    post: {security: [], summary: 绑定设备, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [code, device_name], properties: {code: {type: string, pattern: '^\\d{6}$'}, device_name: {type: string}}}}}}, responses: {'201': {description: Tokens, content: {application/json: {schema: {$ref: '#/components/schemas/Tokens'}}}}, '401': {description: Invalid code}}}
+  /api/auth/refresh:
+    post: {security: [], summary: 轮换刷新令牌, responses: {'200': {description: Tokens}}}
+  /api/sessions:
+    get: {summary: 列出会话, responses: {'200': {description: Sessions, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Session'}}}}}}}
+    post: {summary: 通过 Codex app-server 创建 thread, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [cwd], additionalProperties: false, properties: {cwd: {type: string}}}}}}, responses: {'201': {description: Created}, '400': {description: Invalid input}, '503': {description: App-server unavailable}, '504': {description: App-server timeout}}}
+  /api/sessions/refresh:
+    post: {summary: 重新扫描本机 Codex rollouts, responses: {'200': {description: Refreshed sessions}}}
+  /api/sessions/{id}:
+    parameters: [{$ref: '#/components/parameters/SessionId'}]
+    get: {summary: 会话详情与历史, responses: {'200': {description: Detail}, '404': {description: Not found}}}
+    patch: {summary: 更新本地 overlay, requestBody: {content: {application/json: {schema: {type: object, additionalProperties: false, properties: {title: {type: string}, status: {enum: [active, paused, archived]}, pinned: {type: boolean}}}}}}, responses: {'200': {description: Updated}}}
+    delete: {summary: 清除本地 overlay（不删除 rollout）, responses: {'204': {description: Cleared}}}
+  /api/sessions/{id}/messages:
+    parameters: [{$ref: '#/components/parameters/SessionId'}]
+    post: {summary: 启动 Codex turn（client_id 在 session 内幂等）, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [content], additionalProperties: false, properties: {role: {const: user}, content: {type: string}, client_id: {type: string}}}}}}, responses: {'202': {description: Turn started}, '404': {description: Thread not found}, '409': {description: Active turn or duplicate pending request}, '503': {description: App-server unavailable}, '504': {description: App-server timeout}}}
+  /api/sessions/{id}/cancel:
+    parameters: [{$ref: '#/components/parameters/SessionId'}]
+    post: {summary: Interrupt active turn, responses: {'202': {description: Interrupt requested}, '409': {description: No active turn}, '503': {description: App-server unavailable}}}
+  /api/approvals:
+    get: {summary: 列出待处理审批, parameters: [{in: query, name: session_id, schema: {type: string}}], responses: {'200': {description: Pending approvals, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/PendingApproval'}}}}}}}
+  /api/approvals/{id}:
+    get: {summary: 读取由 app-server 捕获的审批请求, responses: {'200': {description: Approval}, '404': {description: Not found}}}
+  /api/approvals/{id}/decision:
+    post: {summary: 回应 app-server 审批请求, requestBody: {required: true, content: {application/json: {schema: {type: object, required: [decision], additionalProperties: false, properties: {decision: {enum: [accept, decline, cancel]}, answers: {type: object, additionalProperties: {type: array, minItems: 1, items: {type: string}}}}}}}}, responses: {'200': {description: Decision sent}, '404': {description: Approval not found}, '409': {description: Already resolved or stale}, '422': {description: Decision unsupported for this request}}}
+  /api/sync:
+    get: {summary: 按全局游标增量同步事件, parameters: [{in: query, name: cursor, schema: {type: integer, minimum: 0}}], responses: {'200': {description: Events}}}
+components:
+  securitySchemes: {bearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}}
+  parameters: {SessionId: {in: path, name: id, required: true, schema: {type: string}}}
+  schemas:
+    PairCode: {type: object, required: [code, expires_at], properties: {code: {type: string}, expires_at: {type: string, format: date-time}}}
+    Tokens: {type: object, required: [access_token, refresh_token, expires_in, device_id], properties: {access_token: {type: string}, refresh_token: {type: string}, expires_in: {type: integer}, device_id: {type: string, format: uuid}}}
+    Session: {type: object, required: [session_id, title, status, pinned, cwd, created_at, updated_at], properties: {session_id: {type: string}, title: {type: string}, status: {enum: [active, paused, archived]}, pinned: {type: boolean}, cwd: {type: string}, rollout_path: {type: string}, created_at: {type: string, format: date-time}, updated_at: {type: string, format: date-time}}}
+    PendingApproval: {type: object, required: [request_id, session_id, kind, payload, status, created_at, updated_at], properties: {request_id: {type: string}, session_id: {type: string}, turn_id: {type: string}, item_id: {type: string}, kind: {type: string}, payload: {}, status: {const: pending}, created_at: {type: string, format: date-time}, updated_at: {type: string, format: date-time}}}

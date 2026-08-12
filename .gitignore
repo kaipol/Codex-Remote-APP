@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+data/
+.env
+.references/
+packages/web/public/sw.js
+packages/web/public/workbox-*.js
+*.log
+.DS_Store

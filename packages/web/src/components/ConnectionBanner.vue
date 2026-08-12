@@ -1,0 +1,2 @@
+<script setup lang="ts">defineProps<{online:boolean;ws:string;appServer:string;pending:number}>();</script>
+<template><div v-if="!online||ws!=='connected'||appServer==='error'||pending" class="connection-banner" :class="{warning:online,error:appServer==='error'}" role="status"><span class="status-dot"></span><span v-if="!online">离线模式 · 历史仍可阅读，消息将在恢复后发送</span><span v-else-if="ws!=='connected'">连接中断 · 正在同步并重连…</span><span v-else-if="appServer==='error'">Codex app-server 暂不可用</span><span v-else>{{pending}} 条消息等待发送</span></div></template>

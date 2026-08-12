@@ -1,0 +1,3 @@
+<script setup lang="ts">import CopyButton from'./CopyButton.vue';defineProps<{open:boolean;diff:string;title:string}>();defineEmits<{close:[]}>();</script>
+<template><div v-if="open" class="viewer-backdrop" @click.self="$emit('close')"><section class="diff-viewer"><header><div><small>差异审阅</small><strong>{{title}}</strong></div><div class="diff-actions"><CopyButton :text="diff" label="复制差异"/><button class="icon-button" aria-label="关闭" @click="$emit('close')">×</button></div></header><pre><code><template v-for="(line,i) in diff.split('\n')" :key="i"><span :class="line.startsWith('+')?'add':line.startsWith('-')?'remove':'context'">{{line}}
+</span></template></code></pre></section></div></template>
