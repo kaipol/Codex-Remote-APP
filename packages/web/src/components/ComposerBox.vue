@@ -12,7 +12,8 @@ const fileInput = ref<HTMLInputElement>();
 const menu = ref<'add' | 'access' | 'model' | null>(null);
 const modelSection = ref<'root' | 'models' | 'effort'>('root');
 const selectedSkill = ref<SkillOption>();
-const attachments = ref<Array<{ name: string; input: UserInput }>>([]);
+const attachments = ref<Array<{ name: string; bytes: number; input: UserInput }>>([]);
+const attachmentError = ref('');
 const mentions = ref<Array<{ name: string; path: string }>>([]);
 const model = ref('');
 const effort = ref<RuntimeConfig['effort']>('medium');
@@ -33,13 +34,13 @@ let searchAbort: AbortController | null = null;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
 watch(() => props.models, items => { if (!model.value && items.length) model.value = (items.find(x => x.isDefault) || items[0]).model; }, { immediate: true });
-watch(() => props.defaults, value => { if (value.model) model.value = value.model; if (value.effort) effort.value = value.effort; if (value.approvalPolicy) approvalPolicy.value = value.approvalPolicy; if (value.sandbox) sandbox.value = value.sandbox; }, { immediate: true });
+watch(() => props.defaults, value => { if (value.model) model.value = value.model; if (value.effort) effort.value = value.effort; if (value.approvalPolicy) approvalPolicy.value = value.approvalPolicy; if (value.sandbox) sandbox.value = value.sandbox==='danger-full-access'&&!value.allowDangerFullAccess?'workspace-write':value.sandbox; }, { immediate: true });
 const effortOptions = computed(() => props.models.find(x => x.model === model.value)?.supportedReasoningEfforts.length ? props.models.find(x => x.model === model.value)!.supportedReasoningEfforts : ['minimal', 'low', 'medium', 'high', 'xhigh'] as const);
 const selectedModel = computed(() => props.models.find(x => x.model === model.value));
 const accessPreset = computed(() => sandbox.value === 'danger-full-access' && approvalPolicy.value === 'never' ? 'full' : approvalPolicy.value === 'untrusted' ? 'guarded' : 'request');
 const accessLabel = computed(() => accessPreset.value === 'full' ? '完全访问' : accessPreset.value === 'guarded' ? '帮我批准' : '请求批准');
 function toggle(value: 'add' | 'access' | 'model') { menu.value = menu.value === value ? null : value; if (value === 'model') modelSection.value = 'root'; if (menu.value) emit('loadCapabilities'); }
-function setAccessPreset(value: 'request' | 'guarded' | 'full') { if (value === 'full') { sandbox.value = 'danger-full-access'; approvalPolicy.value = 'never'; } else if (value === 'guarded') { sandbox.value = 'workspace-write'; approvalPolicy.value = 'untrusted'; } else { sandbox.value = 'workspace-write'; approvalPolicy.value = 'on-request'; } menu.value = null; }
+function setAccessPreset(value: 'request' | 'guarded' | 'full') { if (value === 'full'&&props.defaults.allowDangerFullAccess) { sandbox.value = 'danger-full-access'; approvalPolicy.value = 'never'; } else if (value === 'guarded') { sandbox.value = 'workspace-write'; approvalPolicy.value = 'untrusted'; } else { sandbox.value = 'workspace-write'; approvalPolicy.value = 'on-request'; } menu.value = null; }
 function outside(event: PointerEvent) { if (root.value && !root.value.contains(event.target as Node)) menu.value = null; }
 onMounted(() => document.addEventListener('pointerdown', outside));
 onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
@@ -149,7 +150,7 @@ function submit() {
   if (selectedSkill.value) items.push({ type: 'skill', name: selectedSkill.value.name, path: selectedSkill.value.path });
   items.push(...attachments.value.map(x => x.input));
   emit('send', { text: value || [...mentions.value.map(m => '@' + m.name), ...attachments.value.map(x => x.name)].join(', '), input: items, runtime: { model: model.value || undefined, effort: effort.value, approvalPolicy: approvalPolicy.value, sandbox: sandbox.value } });
-  text.value = ''; attachments.value = []; selectedSkill.value = undefined; mentions.value = [];
+  text.value = ''; attachments.value = []; attachmentError.value = ''; selectedSkill.value = undefined; mentions.value = [];
   nextTick(resize);
 }
 function resize() { if (!input.value) return; input.value.style.height = 'auto'; input.value.style.height = Math.min(input.value.scrollHeight, 220) + 'px'; }
@@ -177,12 +178,29 @@ async function onDrop(event: DragEvent) {
   const fileList = [...(event.dataTransfer?.files || [])];
   if (fileList.length) await addFiles(fileList);
 }
+const MAX_ATTACHMENTS = 8;
+const MAX_ATTACHMENT_BYTES = 6_500_000;
+const MAX_IMAGE_BYTES = 5_900_000;
 async function addFiles(list: File[]) {
-  for (const file of list.slice(0, 8)) {
-    if (file.size > 6_000_000) continue;
-    if (file.type.startsWith('image/')) attachments.value.push({ name: file.name, input: { type: 'image', url: await dataUrl(file), name: file.name } });
-    else attachments.value.push({ name: file.name, input: { type: 'text', text: 'File: ' + file.name + '\n\n' + await file.text() } });
+  attachmentError.value = '';
+  let total = attachments.value.reduce((sum, item) => sum + item.bytes, 0);
+  let skipped = 0;
+  for (const file of list) {
+    if (attachments.value.length >= MAX_ATTACHMENTS || total + file.size > MAX_ATTACHMENT_BYTES || (file.type.startsWith('image/') && file.size > MAX_IMAGE_BYTES)) {
+      skipped++;
+      continue;
+    }
+    try {
+      const input = file.type.startsWith('image/')
+        ? { type: 'image' as const, url: await dataUrl(file), name: file.name }
+        : { type: 'text' as const, text: 'File: ' + file.name + '\n\n' + await file.text() };
+      attachments.value.push({ name: file.name, bytes: file.size, input });
+      total += file.size;
+    } catch {
+      skipped++;
+    }
   }
+  if (skipped) attachmentError.value = `部分文件未添加：最多 ${MAX_ATTACHMENTS} 个文件、合计 ${Math.floor(MAX_ATTACHMENT_BYTES / 1_000_000)} MB；单张图片不超过 ${Math.floor(MAX_IMAGE_BYTES / 1_000_000)} MB。`;
 }
 async function files(event: Event) {
   const list = [...((event.target as HTMLInputElement).files || [])];
@@ -209,6 +227,7 @@ function slashDesc(cmd: SlashCommand) { return cmd.kind === 'skill' ? (cmd.item.
         <span v-for="(m, index) in mentions" :key="m.path + index" class="composer-chip mention-chip">@{{ m.name }}<button title="移除引用" @click="removeMention(index)">×</button></span>
         <span v-for="(item, index) in attachments" :key="item.name + index" class="composer-chip">{{ item.name }}<button title="移除附件" @click="attachments.splice(index, 1)">×</button></span>
       </div>
+      <p v-if="attachmentError" class="composer-upload-error" role="alert">{{ attachmentError }}</p>
 
       <!-- Slash command popover -->
       <div v-if="slashOpen && slashItems.length" class="composer-popover slash-popover acrylic-panel">
@@ -238,8 +257,8 @@ function slashDesc(cmd: SlashCommand) { return cmd.kind === 'skill' ? (cmd.item.
           <div v-if="menu === 'add'" class="composer-popover add-popover acrylic-panel"><h3>添加到对话</h3><button class="menu-row" @click="fileInput?.click(); menu = null"><span class="menu-icon file-menu-icon">+</span><span><b>文件和文件夹</b><small>上传图片或文本文件</small></span></button><div class="menu-label">技能</div><button v-for="skill in skills.filter(x => x.enabled)" :key="skill.path" class="menu-row" @click="chooseSkill(skill)"><span class="menu-icon skill-menu-icon">◇</span><span><b>{{ skill.name }}</b><small>{{ skill.description || 'Codex 技能' }}</small></span></button><div class="menu-label">插件</div><button v-for="app in apps.filter(x => x.isAccessible && x.isEnabled)" :key="app.id" class="menu-row" @click="chooseApp(app)"><span class="menu-icon plugin-menu-icon">▦</span><span><b>{{ app.name }}</b><small>{{ app.description || '已安装插件' }}</small></span></button><p v-if="capabilitiesLoading">正在读取能力…</p><p v-else-if="!skills.length && !apps.length">当前没有可用技能或插件</p></div>
         </div>
         <div class="composer-anchor composer-access-anchor">
-          <button class="runtime-summary access combined-access" title="调整访问与批准方式" @click="toggle('access')"><span class="access-badge"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span>{{ accessLabel }}</button>
-          <div v-if="menu === 'access'" class="composer-popover access-popover acrylic-panel"><h3>应如何批准 Codex 操作？</h3><button class="access-option" :class="{ selected: accessPreset === 'request' }" @click="setAccessPreset('request')"><span class="access-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><span><b>请求批准</b><small>编辑外部文件和使用互联网时始终询问</small></span><i>✓</i></button><button class="access-option" :class="{ selected: accessPreset === 'guarded' }" @click="setAccessPreset('guarded')"><span class="access-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 4v6c0 5-3.5 8.5-9 10-5.5-1.5-9-5-9-10V6z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span><span><b>帮我批准</b><small>仅对检测到的风险操作请求批准</small></span><i>✓</i></button><button class="access-option danger" :class="{ selected: accessPreset === 'full' }" @click="setAccessPreset('full')"><span class="access-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span><span><b>完全访问权限</b><small>可不受限制地访问互联网和此电脑上的文件</small></span><i>✓</i></button></div>
+          <button class="runtime-summary access combined-access" title="调整访问与批准方式" @click="toggle('access')"><span class="access-badge"><svg v-if="accessPreset === 'request'" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><svg v-else-if="accessPreset === 'guarded'" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 4v6c0 5-3.5 8.5-9 10-5.5-1.5-9-5-9-10V6z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg><svg v-else viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span>{{ accessLabel }}</button>
+          <div v-if="menu === 'access'" class="composer-popover access-popover acrylic-panel"><h3>应如何批准 Codex 操作？</h3><button class="access-option" :class="{ selected: accessPreset === 'request' }" @click="setAccessPreset('request')"><span class="access-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><span><b>请求批准</b><small>编辑外部文件和使用互联网时始终询问</small></span><i>✓</i></button><button class="access-option" :class="{ selected: accessPreset === 'guarded' }" @click="setAccessPreset('guarded')"><span class="access-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 4v6c0 5-3.5 8.5-9 10-5.5-1.5-9-5-9-10V6z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span><span><b>帮我批准</b><small>仅对检测到的风险操作请求批准</small></span><i>✓</i></button><button v-if="props.defaults.allowDangerFullAccess" class="access-option danger" :class="{ selected: accessPreset === 'full' }" @click="setAccessPreset('full')"><span class="access-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span><span><b>完全访问权限</b><small>可不受限制地访问互联网和此电脑上的文件</small></span><i>✓</i></button></div>
         </div>
         <div class="composer-spacer"></div>
         <div class="composer-anchor composer-model-anchor">

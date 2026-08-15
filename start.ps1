@@ -1,0 +1,131 @@
+[CmdletBinding()]
+param(
+    [switch]$Build,
+    [switch]$NoRestartOwned,
+    [int]$ServerPort = 8787,
+    [int]$WebPort = 5173
+)
+
+$ErrorActionPreference = 'Stop'
+$AppRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
+Set-Location -LiteralPath $AppRoot
+$StartedProcesses = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
+
+function Get-NpmCommand {
+    $command = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $command) { $command = Get-Command npm -ErrorAction SilentlyContinue }
+    if (-not $command) { throw '找不到 npm。请先安装 Node.js 20+，并确认 npm 已加入 PATH。' }
+    return $command.Source
+}
+
+function Get-ListenerProcesses([int]$Port) {
+    $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    foreach ($connection in $connections) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($connection.OwningProcess)" -ErrorAction SilentlyContinue
+        if ($process) {
+            [PSCustomObject]@{
+                Port = $Port
+                ProcessId = [int]$connection.OwningProcess
+                Name = [string]$process.Name
+                CommandLine = [string]$process.CommandLine
+            }
+        }
+    }
+}
+
+function Stop-ProcessTree([int]$ProcessId) {
+    if ($ProcessId -le 0 -or $ProcessId -eq $PID) { return }
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" -ErrorAction SilentlyContinue)
+    foreach ($child in $children) { Stop-ProcessTree -ProcessId ([int]$child.ProcessId) }
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function Test-OwnedCommand([string]$CommandLine) {
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+    $normalized = $CommandLine.Replace('%20', ' ').Replace('"', ' ').Replace('/', '\')
+    $root = $AppRoot.TrimEnd('\', '/')
+    $rootIndex = $normalized.IndexOf($root, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($rootIndex -lt 0) { return $false }
+    $beforeBoundary = $rootIndex -eq 0 -or [char]::IsWhiteSpace($normalized[$rootIndex - 1])
+    $afterIndex = $rootIndex + $root.Length
+    $afterBoundary = $afterIndex -ge $normalized.Length -or
+        [char]::IsWhiteSpace($normalized[$afterIndex]) -or
+        $normalized[$afterIndex] -eq '\' -or $normalized[$afterIndex] -eq '/'
+    if (-not $beforeBoundary -or -not $afterBoundary) { return $false }
+    # Require a recognizable npm/dev child command as a second signal. This
+    # avoids treating an unrelated process that merely mentions the directory
+    # as an owned process eligible for recursive termination.
+    return $normalized -match '(?i)(npm(\.cmd)?\s+run\s+dev|node_modules|[\\/]tsx[\\/]dist|[\\/]vite[\\/]bin|concurrently)'
+}
+
+function Assert-PortsAvailable {
+    foreach ($port in @($ServerPort, $WebPort) | Sort-Object -Unique) {
+        foreach ($listener in @(Get-ListenerProcesses -Port $port)) {
+            if (-not $NoRestartOwned -and (Test-OwnedCommand $listener.CommandLine)) {
+                Write-Host "停止本项目残留进程 PID $($listener.ProcessId)（端口 $port）..." -ForegroundColor Yellow
+                Stop-ProcessTree -ProcessId $listener.ProcessId
+                continue
+            }
+            $command = if ($listener.CommandLine) { $listener.CommandLine } else { '<命令行不可读>' }
+            throw "端口 $port 已被其他进程占用（PID $($listener.ProcessId), $($listener.Name)）。未执行强制终止。命令行：$command"
+        }
+    }
+}
+
+function Start-NpmScript([string[]]$Arguments, [int]$Port = 0, [string]$ApiUrl = '') {
+   $previousPort = $env:PORT
+    $previousApiUrl = $env:VITE_API_URL
+   try {
+       if ($Port -gt 0) { $env:PORT = [string]$Port }
+        if ($ApiUrl) { $env:VITE_API_URL = $ApiUrl }
+       $process = Start-Process -FilePath (Get-NpmCommand) -ArgumentList $Arguments -WorkingDirectory $AppRoot -NoNewWindow -PassThru
+       $StartedProcesses.Add($process)
+       return $process
+   } finally {
+       if ($null -eq $previousPort) { Remove-Item Env:PORT -ErrorAction SilentlyContinue } else { $env:PORT = $previousPort }
+        if ($null -eq $previousApiUrl) { Remove-Item Env:VITE_API_URL -ErrorAction SilentlyContinue } else { $env:VITE_API_URL = $previousApiUrl }
+    }
+}
+
+function Wait-Http([string]$Url, [System.Diagnostics.Process]$Process, [int]$TimeoutSeconds = 30) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if ($Process.HasExited) { throw "进程 $($Process.Id) 在服务就绪前退出，退出码 $($Process.ExitCode)。" }
+        try {
+            $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) { return }
+        } catch { }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    throw "等待服务 $Url 超时（${TimeoutSeconds} 秒）。"
+}
+
+try {
+    Write-Host '=== Codex Remote APP 启动 ===' -ForegroundColor Cyan
+    Write-Host "项目目录：$AppRoot" -ForegroundColor Gray
+    Assert-PortsAvailable
+
+    if ($Build) {
+        Write-Host '构建 shared/server/web...' -ForegroundColor Cyan
+        & (Get-NpmCommand) run build
+        if ($LASTEXITCODE -ne 0) { throw "构建失败，退出码 $LASTEXITCODE。" }
+    }
+
+    Write-Host "启动后端（端口 $ServerPort）..." -ForegroundColor Cyan
+    $server = Start-NpmScript @('run', 'dev', '-w', '@remote/server') -Port $ServerPort
+    Wait-Http -Url "http://127.0.0.1:$ServerPort/health" -Process $server
+    Write-Host "后端已就绪：http://127.0.0.1:$ServerPort" -ForegroundColor Green
+
+    Write-Host "启动前端（端口 $WebPort）..." -ForegroundColor Cyan
+    $web = Start-NpmScript @('run', 'dev', '-w', '@remote/web', '--', '--port', "$WebPort") -ApiUrl "http://127.0.0.1:$ServerPort"
+    Wait-Http -Url "http://127.0.0.1:$WebPort/" -Process $web
+    Write-Host "前端已就绪：http://127.0.0.1:$WebPort" -ForegroundColor Green
+    Write-Host '按 Ctrl+C 停止前后端；退出时会清理本项目的整个进程树。' -ForegroundColor Gray
+
+    Wait-Process -Id $web.Id
+}
+finally {
+    foreach ($process in @($StartedProcesses | Select-Object -Unique)) {
+        if ($process -and -not $process.HasExited) { Stop-ProcessTree -ProcessId $process.Id }
+    }
+}

@@ -110,7 +110,7 @@
 .access-option.danger, .access-option.danger small { color: var(--warning); }
 .access-icon { display: grid; width: 28px; height: 28px; place-items: center; }
 .combined-access { gap: 7px; }
-.access-badge { display: grid; width: 22px; height: 22px; flex: none; place-items: center; border: 0; border-radius: 50%; }
+.access-badge { display: grid; width: 16px; height: 16px; flex: none; place-items: center; border: 0; }
 
 .model-settings-popover { padding: 8px !important; overflow: auto; }
 .model-settings-root > button,
@@ -278,8 +278,8 @@
 .send-button,
 .stop-button { position: relative; top: auto !important; right: auto !important; bottom: auto !important; left: auto !important; margin: 0 !important; transform: none !important; }
 .composer-plus { display: grid; width: 38px !important; height: 38px !important; place-items: center; padding: 0 !important; font-size: 25px !important; line-height: 1 !important; }
-.combined-access { display: flex !important; height: 38px !important; align-items: center; gap: 7px; padding: 0 11px !important; border-radius: 19px !important; }
-.runtime-pill { display: flex !important; height: 38px !important; max-width: min(300px, 38vw) !important; align-items: center; gap: 6px; padding: 0 12px !important; border-radius: 19px !important; }
+.combined-access { display: flex !important; height: 36px !important; align-items: center; gap: 6px; padding: 0 12px !important; border-radius: 18px !important; }
+.runtime-pill { display: flex !important; height: 36px !important; max-width: min(300px, 38vw) !important; align-items: center; gap: 6px; padding: 0 12px !important; border-radius: 18px !important; }
 .runtime-pill strong { max-width: 190px; }
 .send-button, .stop-button { display: grid; width: 40px !important; height: 40px !important; flex: none; place-items: center; padding: 0 !important; border-radius: 50% !important; font-size: 22px; line-height: 1; }
 .composer-popover { position: absolute !important; z-index: 80 !important; right: auto !important; left: 0 !important; bottom: calc(100% + 10px) !important; max-height: min(470px, calc(100dvh - 190px)); transform: none !important; }
@@ -289,11 +289,12 @@
 .model-settings-root > .advanced-row { display: none !important; }
 .composer-copy { flex: none; }
 
-.access-badge { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; border: 0; } .access-badge svg { display: block; }
+.access-badge { width: 16px; height: 16px; display: grid; place-items: center; border: 0; } .access-badge svg { display: block; }
 .access-icon { position: relative; display: grid; place-items: center; }
 .access-icon svg { display: block; }
 
-.copy-surface, .message-bubble, .reference-preview, .markdown pre { position: relative; }
+.copy-surface, .message-bubble, .markdown pre { position: relative; }
+.reference-preview { position: absolute; }
 .copy-button {
   display: inline-flex;
   height: 30px;
@@ -321,6 +322,9 @@
 @media (max-width: 700px) { .user-copy { opacity: 1; } }
 .copy-icon { flex: none; display: block; }
 .message-bubble.assistant { padding-top: 2px !important; }
+.user-images { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px !important; }
+.user-images-inline { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.user-image { max-width: 200px; max-height: 200px; border-radius: 12px; cursor: zoom-in; object-fit: cover; }
 .code-copy-button { position: absolute; top: 6px; right: 6px; z-index: 2; display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--muted); opacity: 0; }
 .markdown pre:hover > .code-copy-button, .markdown pre:focus-within > .code-copy-button { opacity: 1; }
 .event-details .copy-button { position: absolute; top: 4px; right: 0; z-index: 2; }
@@ -361,7 +365,7 @@
 /* Tool call group: borderless, blends into conversation like Codex Desktop */
 .tool-call-group {
   max-width: 100%;
-  margin: 4px 0;
+  margin: 8px 0;
   color: var(--muted);
   border: 0;
   background: transparent;
@@ -373,14 +377,16 @@
   min-width: 0;
   align-items: center;
   gap: 8px;
-  padding: 6px 4px;
+  padding: 5px 8px;
   cursor: pointer;
-  border: 0;
-  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 8%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 20%, var(--surface));
+  border-radius: 8px;
   color: var(--muted);
   font-size: 14px;
 }
-.tool-group-icon { flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; background: var(--surface-strong); color: var(--muted); }
+.tool-group-icon { flex: none; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: transparent; color: var(--muted); }
+.tool-group-header:hover { background: color-mix(in srgb, var(--accent-soft) 35%, var(--surface-strong)); }
 .tool-chevron { flex: none; display: grid; place-items: center; width: 16px; height: 16px; color: var(--muted); transition: transform .15s; }
 .tool-chevron-open { transform: rotate(90deg); }
 .tool-group-label { flex: none; color: var(--text); font-size: 14px; font-weight: 500; }
@@ -403,7 +409,9 @@
   display: block;
 }
 .tool-group-inner {
-  overflow: hidden;
+  max-height: 400px;
+  overflow-y: auto;
+  scrollbar-width: thin;
   min-height: 0;
   padding-left: 12px;
   border-left: 1px solid var(--line);
@@ -422,12 +430,44 @@
   overflow: hidden;
 }
 
+/* Sub-group headers inside a cluster: lighter style, no background */
+.tool-sub-group {
+  margin: 2px 0;
+}
+.tool-sub-header {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  cursor: pointer;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: left;
+}
+.tool-sub-header:hover { background: var(--surface); border-radius: 6px; }
+.tool-sub-chevron { width: 14px; height: 14px; }
+.tool-sub-label { flex: none; color: var(--text); font-size: 13px; font-weight: 500; }
+.tool-sub-names {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+.tool-sub-body { display: none; padding-left: 12px; border-left: 1px solid var(--line); }
+.tool-sub-body-visible { display: block; }
+
 .event-row {
   display: flex;
   width: 100%;
   align-items: center;
   gap: 8px;
-  padding: 5px 2px;
+  padding: 5px 4px;
   cursor: pointer;
   border: 0;
   background: transparent;
@@ -449,9 +489,12 @@
   display: block;
 }
 .event-inner {
-  overflow: hidden;
+  max-height: 300px;
+  overflow-y: auto;
+  scrollbar-width: thin;
   min-height: 0;
-  padding: 4px 0 10px 20px;
+  padding: 4px 0 10px 12px;
+  border-left: 1px solid var(--line);
   min-width: 0;
   max-width: 100%;
 }
@@ -500,7 +543,7 @@
 
 /* Standalone event cards: borderless for consistency */
 .event-card {
-  margin: 4px 0;
+  margin: 0;
   border: 0;
   background: transparent;
   border-radius: 0;
@@ -544,7 +587,7 @@
 .manual-input input:focus { border-color: var(--accent); }
 
 /* OpenAI logo avatar */
-.avatar-openai svg { width: 16px; height: 16px; }
+.avatar-openai { padding: 5px; }
 .message-row.assistant .avatar { align-self: flex-start; }
 
 
@@ -571,3 +614,87 @@
 .settings-btn { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border: 0; border-radius: 9px; background: transparent; color: var(--muted); transition: background .12s, color .12s; }
 .settings-btn:hover { background: var(--surface-strong); color: var(--text); }
 .settings-btn svg { display: block; }
+
+/* Pending-message recovery and small-screen width containment. */
+.retry-actions {
+  display: flex;
+  width: min(var(--content), calc(100% - 32px));
+  max-width: 100%;
+  gap: 8px;
+  margin: 8px auto 0;
+  flex-wrap: wrap;
+}
+.retry-chip {
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--line));
+  border-radius: 999px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 12px;
+}
+.retry-chip:hover { border-color: var(--warning); }
+.retry-chip.warning { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); background: var(--danger-soft); color: var(--danger); }
+.message-edit {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+.message-edit:hover { background: var(--surface-strong); color: var(--text); }
+.pending-editor {
+  display: flex;
+  width: min(620px, 100%);
+  max-height: calc(100dvh - 40px);
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.pending-editor header,
+.pending-editor footer { display: flex; align-items: center; gap: 10px; }
+.pending-editor header > div { min-width: 0; flex: 1; }
+.pending-editor header strong,
+.pending-editor header small { display: block; }
+.pending-editor header small { margin-top: 4px; color: var(--muted); line-height: 1.4; }
+.pending-editor textarea { width: 100%; min-height: 150px; resize: vertical; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 12px; line-height: 1.5; outline: none; }
+.pending-editor textarea:focus { border-color: var(--accent); }
+.pending-editor footer > span { flex: 1; }
+.danger-text { color: var(--danger); }
+.composer-upload-error { margin: 0; padding: 0 18px 4px; color: var(--danger); font-size: 12px; line-height: 1.4; }
+
+html,
+body,
+#app,
+.app-shell,
+.main-panel,
+.thread-workspace,
+.conversation,
+.composer-wrap,
+.composer-box,
+.message-row,
+.message-stack { min-width: 0; max-width: 100%; }
+.main-panel,
+.thread-workspace { overflow-x: clip; }
+.conversation { overflow-x: hidden; overflow-y: auto; }
+.message-row > *,
+.message-stack > * { min-width: 0; max-width: 100%; }
+.markdown,
+.plain-message { overflow-wrap: anywhere; word-break: break-word; }
+
+@media (max-width: 520px) {
+  .pending-editor { padding: 16px; }
+  .pending-editor footer { align-items: stretch; flex-wrap: wrap; }
+  .pending-editor footer > span { display: none; }
+}

@@ -21,6 +21,8 @@ CODEX_SESSIONS_DIR=
 
 终端会打印六位配对码。打开 `http://localhost:5173` 配对后，页面自动展示按日期分片的 `rollout-*.jsonl` 会话。列表请求和“刷新”按钮都会重新扫描。
 
+手机或另一台电脑配对时，同时填写服务端地址（例如 `http://192.168.1.10:8787`）。公网部署应使用 HTTPS；局域网、Tunnel 和移动端构建说明见 [`docs/REMOTE-ACCESS.md`](docs/REMOTE-ACCESS.md)。
+
 ## 已实现
 
 - 递归发现 Codex rollout，支持 Windows 路径、坏文件隔离、thread id 去重和稳定排序。
@@ -33,10 +35,13 @@ CODEX_SESSIONS_DIR=
 - Vue UI 已拆分为桌面侧栏/移动抽屉、会话列表、时间线、事件/工具卡、Diff viewer、只读审批 sheet、composer、连接 banner、配对与设置界面。
 - create/send/cancel 使用真实 app-server API；assistant delta 按 turn 合并，未知事件安全降级。
 - IndexedDB 保存会话、消息、全局事件 cursor 和 outbox；重连先增量同步，再按会话顺序使用 `client_id` 重放。
+- access/refresh token 使用 IndexedDB 中不可导出的 Web Crypto 密钥加密保存；旧版 `localStorage` token 会自动迁移并删除。
+- WebSocket 使用 Origin 校验、心跳和设备撤销联动；断线重连会先补齐分页事件，再投影实时事件，避免流式回复缺段或重复。
+- 支持 Capacitor Android 工程；移动端可在配对页配置运行时服务端地址。
 - light/dark/system design tokens、safe-area 与移动固定 composer 已落地。
 - Markdown/KaTeX/常用语言高亮按需加载；Service Worker 不缓存任何认证 API 响应。
 - app-server 审批请求可在 Web 端批准、拒绝或取消；JSON-RPC 请求 ID 按进程 epoch 关联，重启后旧请求自动失效。额外权限授予仍要求在主机端处理，`request_user_input` 支持远程回答。
-- 配对码只能由 loopback 本机调用生成；CORS 默认仅允许本机 Vite 源，可通过 `CORS_ORIGINS` 显式配置。
+- 配对码只能由 loopback 本机调用生成；CORS 默认允许本机 Vite 与 Capacitor (`http://localhost`、`capacitor://localhost`) 源，可通过 `CORS_ORIGINS` 显式配置。
 - cwd 在启动 thread 前要求真实存在并经 `realpath` 后落入 allowlist，阻断符号链接/前缀绕过；子进程固定 `shell:false`。
 
 实现参考了 `.references/yepanywhere` 中 Codex scanner/discovery/reader 的设计，并在源码头部记录了上游 commit attribution；这里只移植 Codex 所需的最小闭包。
@@ -59,11 +64,11 @@ npm run build
 
 测试覆盖发现、解析、坏文件隔离、去重/排序、API 列表和详情、overlay、真实桥接协议、只读审批列表、事件投影/流合并、outbox 顺序与失败隔离、Diff 截断和 Markdown 安全清理。
 
-## 尚未完成 / 边界
+## 边界
 
 - 额外权限授予仍只允许在本机 Codex 处理；远程端只能拒绝此类请求。审批不会离线排队。
-- 未实现 E2EE、Tunnel/VPS relay、Capacitor、推送通知或原生设备密钥；当前安全边界是配对令牌与部署层 TLS。
-- Web 客户端目前把 access/refresh token 存于 `localStorage`；这是已知安全债务，不等同于设备密钥或安全存储。
+- 未实现 E2EE、内置 Tunnel/VPS relay、推送通知或系统钥匙串集成；当前安全边界是配对令牌、浏览器本地加密存储与部署层 TLS。
+- 浏览器 IndexedDB 的不可导出密钥可以降低静态 token 泄漏风险，但不等同于原生系统钥匙串，也无法防御同源脚本被攻陷。
 - 未加入 zstd rollout、超大历史增量索引、文件浏览器或原生安装包。
 - 离线能力是可靠的消息 outbox 与缓存 transcript，不包含离线创建会话、审批或冲突编辑。
 

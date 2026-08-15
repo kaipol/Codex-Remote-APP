@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import {computed,onBeforeUnmount,onMounted,ref} from 'vue';
-import type {AppOption,ApprovalDecision,BridgeEvent,CodexDefaults,Message,ModelOption,PendingApproval,RuntimeConfig,Session,SkillOption,UserInput} from '@remote/shared';
-import {api,clearAuth,connect,hasAuth,pair} from './api';
-import {cacheEvents,cacheMessages,cacheSessions,cursor,db,setCursor,type Pending} from './db';
-import {mergeBridgeEvent} from './composables/eventProjection';
-import {replayInSessionOrder} from './composables/outbox';
+import type {AppOption,ApprovalDecision,BridgeEvent,CodexDefaults,Message,ModelOption,PendingApproval,ProjectInfo,RuntimeConfig,Session,SkillOption,UserInput} from '@remote/shared';
+import {ApiError,api,clearAuth,configureServerUrl,connect,currentServerUrl,ensureFreshToken,hasAuth,onAuthLost,onTokenRefreshed,pair} from './api';
+import {cacheEvents,cacheMessages,cacheSessions,clearLocalState,cursor,db,setCursor,setStreamId,streamId,type Pending} from './db';
+import {deriveActiveTurn,mergeBridgeEvent,projectBridgeEvents} from './composables/eventProjection';
+import {DeferredSendError,replayInSessionOrder} from './composables/outbox';
+import {drainSync} from './composables/sync';
 import AppShell from './components/AppShell.vue';
 import ApprovalSheet from './components/ApprovalSheet.vue';
 import ComposerBox from './components/ComposerBox.vue';
@@ -12,58 +13,274 @@ import ConnectionBanner from './components/ConnectionBanner.vue';
 import ConversationTimeline from './components/ConversationTimeline.vue';
 import DiffViewer from './components/DiffViewer.vue';
 import PairingSurface from './components/PairingSurface.vue';
+import NewThreadDialog from './components/NewThreadDialog.vue';
 import SessionSidebar from './components/SessionSidebar.vue';
 import SettingsSurface from './components/SettingsSurface.vue';
 import ThreadHeader from './components/ThreadHeader.vue';
 
-const paired=ref(hasAuth()),pairBusy=ref(false),error=ref(''),createError=ref(''),sessions=ref<Session[]>([]),active=ref<Session|null>(null),messages=ref<Message[]>([]),events=ref<BridgeEvent[]>([]),approvals=ref<PendingApproval[]>([]),approvalBusy=ref(''),online=ref(navigator.onLine),wsState=ref<'connected'|'connecting'|'offline'>('offline'),appServer=ref<'ready'|'error'>('ready'),drawer=ref(false),sidebarHidden=ref(localStorage.getItem('sidebar-hidden')==='true'),creatingThread=ref(false),loadingSessions=ref(false),loadingThread=ref(false),activeTurn=ref(false),sending=ref(false),pending=ref<Pending[]>([]),settingsOpen=ref(false),approvalOpen=ref(false),diffOpen=ref(false),diff=ref(''),diffTitle=ref(''),theme=ref(localStorage.getItem('theme')||'system'),models=ref<ModelOption[]>([]),skills=ref<SkillOption[]>([]),apps=ref<AppOption[]>([]),defaults=ref<CodexDefaults>({}),capabilitiesLoading=ref(false);
-let ws:WebSocket|null=null,retry:number|undefined,manualClose=false;
+const paired=ref(false),pairBusy=ref(false),error=ref(''),sessions=ref<Session[]>([]),active=ref<Session|null>(null),messages=ref<Message[]>([]),events=ref<BridgeEvent[]>([]),approvals=ref<PendingApproval[]>([]),approvalBusy=ref(''),online=ref(navigator.onLine),wsState=ref<'connected'|'connecting'|'offline'>('offline'),appServer=ref<'ready'|'error'>('ready'),drawer=ref(false),sidebarHidden=ref(localStorage.getItem('sidebar-hidden')==='true'),creatingThread=ref(false),loadingSessions=ref(false),loadingThread=ref(false),activeTurn=ref(false),sending=ref(false),pending=ref<Pending[]>([]),settingsOpen=ref(false),approvalOpen=ref(false),diffOpen=ref(false),diff=ref(''),diffTitle=ref(''),theme=ref(localStorage.getItem('theme')||'system'),models=ref<ModelOption[]>([]),skills=ref<SkillOption[]>([]),apps=ref<AppOption[]>([]),defaults=ref<CodexDefaults>({}),capabilitiesLoading=ref(false),allowedCwds=ref<string[]>([]),projectList=ref<ProjectInfo[]>([]),sidebarOrder=ref<Record<string,string[]>>({}),projectOrder=ref<string[]>([]);
+const draftCwd=ref(''),newThreadOpen=ref(false),createError=ref(''),initialServer=ref(currentServerUrl()),editingPending=ref<Pending|null>(null),pendingEditorText=ref('');let ws:WebSocket|null=null,retryTimer:number|undefined,keepaliveTimer:number|undefined,sessionRefreshTimer:number|undefined,manualClose=false;
+let retryCount=0;
+let wsGeneration=0;
+let selectionGeneration=0;
 const pendingCount=computed(()=>pending.value.filter(item=>item.status!=='sent').length);
-const pendingStates=computed(()=>Object.fromEntries(pending.value.map(item=>[item.id,item.status==='pending'?'已排队':item.status==='sending'?'发送中':item.status==='failed'?`发送失败：${item.error||'可重试'}`:'已接收'])));
+const pendingStates=computed(()=>Object.fromEntries(pending.value.map(item=>[item.id,item.status==='pending'?'已排队':item.status==='waiting'?'等待当前回复结束':item.status==='sending'?'发送中':item.status==='failed'?`发送失败：${item.error||'可重试'}`:item.status==='quarantined'?`已隔离：${item.error||'请确认后重试'}`:'已接收'])));
 function updateSession(updated:Session){const index=sessions.value.findIndex(item=>item.session_id===updated.session_id);if(index>=0)sessions.value[index]=updated;else sessions.value.unshift(updated);active.value=active.value?.session_id===updated.session_id?updated:active.value;void db.sessions.put(updated)}
 function applyTheme(value:string){theme.value=value;localStorage.setItem('theme',value);document.documentElement.dataset.theme=value}
 function toggleSidebar(){sidebarHidden.value=!sidebarHidden.value;localStorage.setItem('sidebar-hidden',String(sidebarHidden.value))}
-async function doPair(code:string){pairBusy.value=true;error.value='';try{await pair(code);paired.value=true;await boot()}catch(e){error.value=e instanceof Error?e.message:'配对失败'}finally{pairBusy.value=false}}
-async function loadSessions(refresh=false){loadingSessions.value=true;error.value='';try{const list=refresh?await api.refreshSessions():await api.sessions();sessions.value=list;await cacheSessions(list);appServer.value='ready'}catch(e){sessions.value=await db.sessions.orderBy('updated_at').reverse().toArray();error.value=e instanceof Error?e.message:'无法读取会话';appServer.value='error'}finally{loadingSessions.value=false}if(!active.value&&sessions.value[0])await select(sessions.value[0])}
-async function select(session:Session){active.value=session;drawer.value=false;loadingThread.value=true;try{const detail=await api.session(session.session_id);messages.value=detail.messages;events.value=detail.events;await Promise.all([cacheMessages(detail.messages),cacheEvents(detail.events)]);approvals.value=await api.approvals(session.session_id);activeTurn.value=detail.events.slice().reverse().find(e=>e.type==='turn_started'||e.type==='turn_completed'||e.type==='turn_failed')?.type==='turn_started'}catch{messages.value=await db.messages.where('session_id').equals(session.session_id).sortBy('seq');events.value=await db.events.where('session').equals(session.session_id).sortBy('seq');approvals.value=[]}finally{loadingThread.value=false}}
-function createThread(){void createInCwd(active.value?.cwd||'')}
-function createInCwd(cwd:string){creatingThread.value=true;createError.value='';error.value='';api.create(cwd||'.').then(created=>{updateSession(created);void select(created)}).catch(e=>{error.value=e instanceof Error?e.message:'创建失败'}).finally(()=>{creatingThread.value=false})}
+async function doPair(code:string,serverUrl:string){pairBusy.value=true;error.value='';try{initialServer.value=configureServerUrl(serverUrl);await pair(code);await clearLocalState();paired.value=true;await boot()}catch(e){error.value=e instanceof Error?e.message:'配对失败'}finally{pairBusy.value=false}}
+async function loadSessions(refresh=false){loadingSessions.value=true;error.value='';try{const list=refresh?await api.refreshSessions():await api.sessions();sessions.value=list;await cacheSessions(list);appServer.value='ready';if(active.value&&active.value.session_id!=='draft'&&!list.some(item=>item.session_id===active.value?.session_id)){selectionGeneration++;active.value=null;messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false}}catch(e){sessions.value=await db.sessions.orderBy('updated_at').reverse().toArray();error.value=e instanceof Error?e.message:'无法读取会话';appServer.value='error'}finally{loadingSessions.value=false}if(!active.value&&sessions.value[0])await select(sessions.value[0])}
+function createThread(){startDraft(active.value?.cwd||allowedCwds.value[0]||'')}
+function createInCwd(cwd:string){startDraft(allowedCwds.value.includes(cwd)?cwd:allowedCwds.value[0]||cwd)}
+function openManualCreate(){createError.value='';newThreadOpen.value=true}
+async function confirmCreate(cwd:string){creatingThread.value=true;createError.value='';error.value='';try{const created=await api.create(allowedCwds.value.includes(cwd)?cwd:allowedCwds.value[0]||cwd||'.');updateSession(created);newThreadOpen.value=false;await select(created)}catch(e){createError.value=e instanceof Error?e.message:'创建失败';newThreadOpen.value=true}finally{creatingThread.value=false}}
+function startDraft(cwd:string){
+  selectionGeneration++;
+  const effectiveCwd=allowedCwds.value.includes(cwd)?cwd:allowedCwds.value[0]||cwd||'.';
+  draftCwd.value=effectiveCwd;
+  active.value={session_id:'draft',title:'新会话',status:'active',pinned:false,cwd:effectiveCwd,created_at:new Date().toISOString(),updated_at:new Date().toISOString()};
+  messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false;drawer.value=false;loadingThread.value=false;
+}
 async function rename(){if(!active.value)return;const title=prompt('会话名称',active.value.title)?.trim();if(title)updateSession(await api.update(active.value.session_id,{title}))}
 async function pin(session:Session){try{updateSession(await api.update(session.session_id,{pinned:!session.pinned}));sessions.value.sort((a,b)=>Number(b.pinned)-Number(a.pinned)||b.updated_at.localeCompare(a.updated_at))}catch(e){error.value=e instanceof Error?e.message:'置顶失败'}}
 async function archive(session:Session){try{const status=session.status==='archived'?'active':'archived';updateSession(await api.update(session.session_id,{status}));if(active.value?.session_id===session.session_id&&status==='archived')active.value=null}catch(e){error.value=e instanceof Error?e.message:'归档失败'}}
 async function renameSession(session:Session){active.value=session;await rename()}
 async function loadCapabilities(){if(!active.value||capabilitiesLoading.value)return;capabilitiesLoading.value=true;const requests=[api.models().then(value=>{models.value=value}),api.skills(active.value.cwd).then(value=>{skills.value=value}),api.apps(active.value.session_id).then(value=>{apps.value=value}),api.defaults().then(value=>{defaults.value=value})];const results=await Promise.allSettled(requests);const failed=results.find(x=>x.status==='rejected');if(failed&&results[3].status==='rejected')error.value=failed.reason instanceof Error?failed.reason.message:'无法读取 Codex 能力';capabilitiesLoading.value=false}
-async function syncAll(){const current=await cursor();const result=await api.sync(current);let max=current;for(const event of result.events){max=Math.max(max,event.seq);await project(event)}await cacheEvents(result.events);await setCursor(max);await replayOutbox()}
-async function project(event:BridgeEvent){await db.events.put(event);if(event.seq)await setCursor(Math.max(await cursor(),event.seq));if(event.session!==active.value?.session_id)return;const projected=mergeBridgeEvent({messages:messages.value,events:events.value,activeTurn:activeTurn.value},event);messages.value=projected.messages;events.value=projected.events;activeTurn.value=projected.activeTurn;const final=projected.messages.find(m=>m.msg_id===String(event.metadata?.item_id||event.id));if(final&&event.type==='assistant_message')await db.messages.put(final);if(event.type==='approval_requested'||event.type==='turn_started'||event.type==='turn_completed'||event.type==='turn_failed')approvals.value=await api.approvals(event.session).catch(()=>approvals.value)}
-function openWs(){if(!paired.value||!online.value)return;clearTimeout(retry);manualClose=true;ws?.close();manualClose=false;wsState.value='connecting';ws=connect(message=>{if(message.type==='event'&&message.event)void project(message.event)});if(!ws)return;ws.onopen=async()=>{wsState.value='connected';try{await syncAll();appServer.value='ready'}catch{appServer.value='error'}};ws.onclose=()=>{wsState.value=online.value?'connecting':'offline';if(!manualClose&&online.value)retry=window.setTimeout(openWs,1800)}}
-async function queueMessage(payload:{text:string;input:UserInput[];runtime:RuntimeConfig}){if(!active.value)return;const id=crypto.randomUUID();const item:Pending={id,session_id:active.value.session_id,content:payload.text,input:payload.input,runtime:payload.runtime,created_at:new Date().toISOString(),status:'pending'};await db.pending.put(item);pending.value.push(item);const refs=payload.input.filter(x=>x.type==='mention'||x.type==='image'||x.type==='skill').map(x=>x.type==='mention'?{type:'file' as const,label:x.name,path:x.path}:x.type==='image'?{type:'file' as const,label:x.name||'图片',path:''}:{type:'skill' as const,label:x.name,path:x.path});messages.value.push({msg_id:`local:${id}`,client_id:id,session_id:item.session_id,role:'user',content:payload.text,timestamp:item.created_at,seq:Number.MAX_SAFE_INTEGER-pending.value.length,...(refs.length?{references:refs}:{})});await db.messages.put(messages.value.at(-1)!);if(online.value)await replayOutbox()}
-async function replayOutbox(){if(sending.value||!online.value)return;sending.value=true;const items=await db.pending.where('status').anyOf('pending','failed','sending').toArray();await replayInSessionOrder(items,item=>api.send(item.session_id,item.input??[{type:'text',text:item.content}],item.id,item.runtime),async item=>{await db.pending.put(item);const index=pending.value.findIndex(x=>x.id===item.id);if(index>=0)pending.value[index]={...item};else pending.value.push({...item})});sending.value=false}
+let syncResetObserved=false;
+let syncInFlight:Promise<void>|null=null;
+let syncGeneration=0;
+async function resetSyncState(){
+  syncResetObserved=true;
+  await db.transaction('rw',db.sessions,db.events,db.messages,db.pending,db.meta,async()=>{
+    await db.sessions.clear();await db.events.clear();await db.messages.clear();
+    // A stream reset means the server event history changed.  Retrying an
+    // in-flight request automatically could create a duplicate turn, so keep
+    // it quarantined until the user explicitly confirms a retry.
+    await db.pending.toCollection().modify(item=>{if(item.status!=='sent'){item.status='quarantined';item.error='服务器同步状态已重置，请确认后重试'}});
+    await db.pending.where('status').equals('sent').delete();
+    await db.meta.clear();
+  });
+  pending.value=await db.pending.toArray();sessions.value=[];selectionGeneration++;active.value=null;approvals.value=[];events.value=[];messages.value=[];activeTurn.value=false;
+}
+async function syncAll(generation=wsGeneration){
+  if(syncInFlight&&syncGeneration===generation)return syncInFlight;
+  const priorSync=syncInFlight;
+  if(priorSync){
+    await priorSync.catch(()=>{});
+    const replacementSync=syncInFlight;
+    if(replacementSync)return replacementSync;
+  }
+  const run=async()=>{
+    syncResetObserved=false;
+    let requestedStream=await streamId();
+    const apply=async(event:BridgeEvent)=>{if(generation===wsGeneration)await enqueueProject(event,generation)};
+    const reset=async()=>{if(generation===wsGeneration)await resetSyncState()};
+    const finalCursor=await drainSync(await cursor(),async value=>{const page=await api.sync(value,requestedStream);if(page.stream_id)requestedStream=page.stream_id;return page},apply,reset);
+    if(generation!==wsGeneration)return;
+    await setCursor(finalCursor);if(requestedStream)await setStreamId(requestedStream);
+    if(syncResetObserved){await loadSessions(true);return}
+    await replayOutbox();
+  };
+  const tracked=run().finally(()=>{if(syncInFlight===tracked)syncInFlight=null});
+  syncGeneration=generation;
+  syncInFlight=tracked;
+  return tracked;
+}
+function refreshSessionsSoon(){clearTimeout(sessionRefreshTimer);sessionRefreshTimer=window.setTimeout(()=>void loadSessions(true),150)}
+async function acknowledgePending(items:Message[]){
+  await acknowledgeClientIds(items.map(item=>item.client_id).filter((id):id is string=>Boolean(id)));
+}
+async function acknowledgeClientIds(ids:string[]){
+  const clientIds=[...new Set(ids.filter(Boolean))];
+  if(!clientIds.length)return;
+  await Promise.all(clientIds.flatMap(clientId=>[db.pending.delete(clientId),db.messages.delete(`local:${clientId}`)]));
+  const acknowledged=new Set(clientIds);
+  pending.value=pending.value.filter(item=>!acknowledged.has(item.id));
+  messages.value=messages.value.filter(item=>!(item.msg_id.startsWith('local:')&&item.client_id&&acknowledged.has(item.client_id)));
+}
+async function reconcilePending(){
+  const queued=await db.pending.toArray();
+  const sessionIds=[...new Set(queued.map(item=>item.session_id).filter(id=>id&&id!=='draft'))];
+  await Promise.all(sessionIds.map(async sessionId=>{
+    const detail=await api.session(sessionId).catch(()=>undefined);
+    if(detail)await acknowledgePending(detail.messages);
+  }));
+}
+async function project(event:BridgeEvent){
+  await db.events.put(event);
+  if(event.type==='session_updated')refreshSessionsSoon();
+  // The app-server emits the canonical user_message event after it has
+  // accepted a turn.  That event is the durable acknowledgement for the
+  // outbox item, so clear it even when the user is currently viewing another
+  // session.  Previously this happened only in the active-session branch,
+  // leaving one "unsent" message stuck forever after a reconnect or a quick
+  // session switch.
+  if(event.type==='user_message'&&typeof event.metadata?.client_id==='string'){
+    const clientId=event.metadata.client_id;
+    await acknowledgeClientIds([clientId]);
+  }
+  const turnFinished=event.type==='turn_completed'||event.type==='turn_failed';
+  if(event.session!==active.value?.session_id){
+    if(event.seq)await setCursor(Math.max(await cursor(),event.seq));
+    if(turnFinished)void replayOutbox();
+    return;
+  }
+  const projected=mergeBridgeEvent({messages:messages.value,events:events.value,activeTurn:activeTurn.value},event);
+  messages.value=projected.messages;events.value=projected.events;activeTurn.value=projected.activeTurn;
+  if(event.type==='user_message'||event.type==='assistant_message')await cacheMessages(projected.messages.filter(message=>!message.msg_id.startsWith('stream:')));
+  if(event.type==='approval_requested'||event.type==='turn_started'||turnFinished)approvals.value=await api.approvals(event.session).catch(()=>approvals.value);
+  if(event.seq)await setCursor(Math.max(await cursor(),event.seq));
+  if(turnFinished)void replayOutbox();
+}
+let projectQueue=Promise.resolve();
+function enqueueProject(event:BridgeEvent,generation:number){projectQueue=projectQueue.then(()=>generation===wsGeneration?project(event):undefined).catch(reason=>{console.warn('[remote:projection] failed',reason)});return projectQueue}
+
+// Reconnection with grace period and proactive token refresh.
+// The core fix: access tokens expire (30 min TTL) and the WS upgrade endpoint
+// rejects stale tokens with 401. Before each reconnect we refresh the token
+// so the new WebSocket always carries a valid token.
+const GRACE_PERIOD=5000;
+let wsGraceTimer:number|undefined;
+let wasConnectedOnce=false;
+let wsReconnecting=false;
+
+function getRetryDelay():number{
+  const base=500;const factor=1.4;const max=8000;
+  const delay=Math.min(base*Math.pow(factor,retryCount),max);
+  const jitter=delay*0.2*(Math.random()*2-1);
+  return Math.round(delay+jitter);
+}
+
+function showConnecting(){
+  if(wasConnectedOnce){
+    if(wsState.value==='connected')
+      wsGraceTimer=window.setTimeout(()=>{if(wsState.value!=='connected')wsState.value='connecting'},GRACE_PERIOD);
+  }else{
+    wsState.value='connecting';clearTimeout(wsGraceTimer);
+  }
+}
+
+async function openWs(){
+  if(!paired.value||!online.value||wsReconnecting)return;
+  wsReconnecting=true;
+  const generation=++wsGeneration;
+  clearTimeout(retryTimer);clearInterval(keepaliveTimer);
+  const previous=ws;ws=null;previous?.close();
+  showConnecting();
+   const buffered:BridgeEvent[]=[];let synchronized=false;
+   const socket=connect(message=>{if(generation===wsGeneration&&message.type==='event'&&message.event){if(synchronized)void enqueueProject(message.event,generation);else buffered.push(message.event)}});
+  ws=socket;
+  if(!socket){wsReconnecting=false;return}
+   socket.onopen=async()=>{if(generation!==wsGeneration)return;console.info('[remote:ws] connected');clearTimeout(wsGraceTimer);wsState.value='connected';wasConnectedOnce=true;try{await syncAll(generation);if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;while(buffered.length){if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;const batch=buffered.splice(0).sort((a,b)=>a.seq-b.seq||a.timestamp.localeCompare(b.timestamp));for(const event of batch){if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;await enqueueProject(event,generation)}}if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;synchronized=true;appServer.value='ready';wsReconnecting=false;retryCount=0}catch(error){console.warn('[remote:sync] failed',error);appServer.value='error';socket.close()}};
+  socket.onclose=()=>{
+    if(generation!==wsGeneration)return;
+    console.warn('[remote:ws] disconnected',{retryCount:retryCount+1});
+    clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);wsReconnecting=false;
+    if(!manualClose&&online.value){
+      retryCount++;
+      // Keep showing 'connected' during grace period for the first few retries
+      if(wasConnectedOnce&&retryCount<=3){
+        wsState.value='connected';
+        wsGraceTimer=window.setTimeout(()=>{if(wsState.value!=='connected')wsState.value='connecting'},GRACE_PERIOD);
+      }else{
+        wsState.value='connecting';
+      }
+      // Refresh token before reconnecting — the access token may have expired
+      // and the WS upgrade endpoint rejects stale tokens with 401.
+      retryTimer=window.setTimeout(async()=>{
+        if(!hasAuth())return;
+        if(retryCount%3===0)await ensureFreshToken().catch(()=>{});
+        openWs();
+      },getRetryDelay());
+    }else{
+      wsState.value=online.value?'connecting':'offline';
+    }
+  };
+  // Keepalive: detect stuck CONNECTING and force-close so onclose can reconnect
+  let connectingSince=0;
+  keepaliveTimer=window.setInterval(()=>{
+    if(!ws){if(online.value&&!manualClose&&!wsReconnecting)openWs();return}
+    if(ws.readyState===WebSocket.OPEN){connectingSince=0;return}
+    if(ws.readyState===WebSocket.CONNECTING){
+      if(!connectingSince)connectingSince=Date.now();
+      else if(Date.now()-connectingSince>15000){connectingSince=0;ws.close()}
+    }else clearInterval(keepaliveTimer);
+  },5000);
+}
+
+// When REST API refreshes the token (e.g. after a 401 on a regular API call),
+// proactively reconnect the WebSocket so it picks up the new token.
+onTokenRefreshed(()=>{
+  if(paired.value&&online.value&&!wsReconnecting){
+    manualClose=true;clearTimeout(retryTimer);ws?.close();manualClose=false;
+    void openWs();
+  }
+});
+
+async function queueMessage(payload:{text:string;input:UserInput[];runtime:RuntimeConfig}){if(!active.value)return;
+  let sessionId=active.value.session_id;let cwd=active.value.cwd;
+  if(sessionId==='draft'){creatingThread.value=true;error.value='';try{const created=await api.create(draftCwd.value||cwd||'.');sessionId=created.session_id;updateSession(created);active.value=created;draftCwd.value='';await loadCapabilities()}catch(e){error.value=e instanceof Error?e.message:'创建失败';creatingThread.value=false;return}finally{creatingThread.value=false}}
+  const id=crypto.randomUUID();const item:Pending={id,session_id:sessionId,content:payload.text,input:payload.input,runtime:payload.runtime,created_at:new Date().toISOString(),status:'pending'};console.info('[remote:message] queued',{clientId:id,sessionId,inputCount:payload.input.length});await db.pending.put(item);pending.value.push(item);const refs=payload.input.filter(x=>x.type==='mention'||x.type==='image'||x.type==='skill').map(x=>x.type==='mention'?{type:'file' as const,label:x.name,path:x.path}:x.type==='image'?{type:'file' as const,label:x.name||'图片',url:x.url}:{type:'skill' as const,label:x.name,path:x.path});messages.value.push({msg_id:`local:${id}`,client_id:id,session_id:sessionId,role:'user',content:payload.text,timestamp:item.created_at,seq:Number.MAX_SAFE_INTEGER-pending.value.length,...(refs.length?{references:refs}:{})});await db.messages.put(messages.value.at(-1)!);if(online.value)await replayOutbox()}
+async function replayOutbox(){if(sending.value||!online.value)return;sending.value=true;const items=await db.pending.where('status').anyOf('pending','waiting','failed','sending').toArray();if(!items.length){sending.value=false;return}try{await replayInSessionOrder(items,async item=>{console.info('[remote:message] sending',{clientId:item.id,sessionId:item.session_id});try{const accepted=await api.send(item.session_id,item.input??[{type:'text',text:item.content}],item.id,item.runtime);console.info('[remote:message] accepted',{clientId:item.id,sessionId:item.session_id,turnId:accepted.turn_id});return accepted}catch(error){if(error instanceof ApiError&&error.status===409&&/(?:active turn|already in progress)/i.test(error.message))throw new DeferredSendError();throw error}},async item=>{const index=pending.value.findIndex(x=>x.id===item.id);if(item.status==='sent'){await db.pending.delete(item.id);if(index>=0)pending.value.splice(index,1);return}await db.pending.put(item);if(index>=0)pending.value[index]={...item};else pending.value.push({...item});if(item.status==='failed')console.error('[remote:message] failed',{clientId:item.id,sessionId:item.session_id,error:item.error})})}finally{sending.value=false}}
 async function retryFailed(){for(const item of pending.value.filter(x=>x.status==='failed')){item.status='pending';item.error=undefined;await db.pending.put(item)}await replayOutbox()}
-async function cancel(){if(!active.value)return;try{await api.cancel(active.value.session_id)}catch(e){error.value=e instanceof Error?e.message:'停止失败'}}
+async function retryQuarantined(){for(const item of pending.value.filter(x=>x.status==='quarantined')){item.status='pending';item.error=undefined;await db.pending.put(item)}await replayOutbox()}
+function openPendingEditor(message:Message){const item=message.client_id?pending.value.find(value=>value.id===message.client_id):undefined;if(!item)return;editingPending.value=item;pendingEditorText.value=item.content}
+async function savePendingEdit(){const item=editingPending.value;const content=pendingEditorText.value.trim();if(!item||!content)return;item.content=content;const textIndex=item.input?.findIndex(input=>input.type==='text')??-1;item.input=textIndex>=0?item.input!.map((input,index)=>index===textIndex?{type:'text' as const,text:content}:input):[{type:'text',text:content},...(item.input??[])];item.status='pending';item.error=undefined;await db.pending.put(item);const index=pending.value.findIndex(value=>value.id===item.id);if(index>=0)pending.value[index]={...item};messages.value=messages.value.map(message=>message.client_id===item.id?{...message,content}:message);await db.messages.put({msg_id:`local:${item.id}`,client_id:item.id,session_id:item.session_id,role:'user',content,timestamp:item.created_at,seq:Number.MAX_SAFE_INTEGER-(index>=0?index:0)});editingPending.value=null;pendingEditorText.value='';await replayOutbox()}
+async function cancelPendingMessage(){const item=editingPending.value;if(!item)return;await Promise.all([db.pending.delete(item.id),db.messages.delete(`local:${item.id}`)]);pending.value=pending.value.filter(value=>value.id!==item.id);messages.value=messages.value.filter(message=>message.client_id!==item.id);editingPending.value=null;pendingEditorText.value=''}
 async function decideApproval(approval:PendingApproval,decision:ApprovalDecision,answers?:Record<string,string[]>){approvalBusy.value=approval.request_id;error.value='';try{await api.decide(approval.request_id,decision,answers);approvals.value=approvals.value.filter(item=>item.request_id!==approval.request_id)}catch(e){error.value=e instanceof Error?e.message:'审批失败'}finally{approvalBusy.value=''}}
 function openDiff(value:string,title:string){diff.value=value;diffTitle.value=title;diffOpen.value=true}
-function network(){online.value=navigator.onLine;if(online.value){openWs()}else{wsState.value='offline';ws?.close()}}
-async function boot(){pending.value=await db.pending.toArray();await loadSessions();await loadCapabilities();openWs()}
-function unpair(){manualClose=true;ws?.close();clearAuth();paired.value=false;settingsOpen.value=false;sessions.value=[];active.value=null}
-onMounted(()=>{applyTheme(theme.value);addEventListener('online',network);addEventListener('offline',network);if(paired.value)void boot()});
-onBeforeUnmount(()=>{manualClose=true;removeEventListener('online',network);removeEventListener('offline',network);ws?.close();clearTimeout(retry)});
+function network(){online.value=navigator.onLine;if(online.value){openWs()}else{wsState.value='offline';clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);ws?.close()}}
+async function boot(){await db.pending.where('status').equals('sent').delete();pending.value=await db.pending.toArray();try{allowedCwds.value=await api.cwdRoots()}catch{allowedCwds.value=[]};try{const proj=await api.projects();projectList.value=proj.projects;sidebarOrder.value=proj.sidebarOrder;projectOrder.value=proj.projectOrder}catch{projectList.value=[];sidebarOrder.value={};projectOrder.value=[]};await loadSessions();await loadCapabilities();openWs();void reconcilePending()}
+async function unpair(){manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);wasConnectedOnce=false;ws?.close();await api.revoke().catch(()=>{});await clearAuth(false);await clearLocalState();paired.value=false;settingsOpen.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[]}
+onAuthLost(()=>{manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);wasConnectedOnce=false;ws?.close();void clearLocalState();paired.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[];error.value='登录已过期，请重新配对'});
+onMounted(async()=>{applyTheme(theme.value);addEventListener('online',network);addEventListener('offline',network);await clearAuth(false);paired.value=false});
+onBeforeUnmount(()=>{manualClose=true;removeEventListener('online',network);removeEventListener('offline',network);ws?.close();clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer)});
+async function select(session:Session){
+  const generation=++selectionGeneration;
+  if(active.value?.session_id==='draft'&&session.session_id!=='draft')draftCwd.value='';
+  active.value=session;drawer.value=false;loadingThread.value=true;messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false;
+  try{
+    let detail=await api.session(session.session_id);
+    if(!detail){for(let i=0;i<3;i++){await new Promise(r=>setTimeout(r,400));if(generation!==selectionGeneration)return;detail=await api.session(session.session_id);if(detail)break}}
+    if(generation!==selectionGeneration)return;
+    if(detail){
+      const nextApprovals=await api.approvals(session.session_id).catch(()=>[]);
+      if(generation!==selectionGeneration)return;
+      await acknowledgePending(detail.messages);
+      if(generation!==selectionGeneration)return;
+      messages.value=detail.messages;events.value=detail.events;approvals.value=nextApprovals;activeTurn.value=deriveActiveTurn(detail.events);
+      await Promise.all([cacheMessages(detail.messages),cacheEvents(detail.events)]);
+    }else{messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false}
+  }catch{
+    if(generation!==selectionGeneration)return;
+    const [cachedMessages,cachedEvents]=await Promise.all([db.messages.where('session_id').equals(session.session_id).sortBy('seq'),db.events.where('session').equals(session.session_id).sortBy('seq')]);
+    if(generation!==selectionGeneration)return;
+    const projected=projectBridgeEvents(cachedMessages,cachedEvents);messages.value=projected.messages;events.value=projected.events;approvals.value=[];activeTurn.value=projected.activeTurn;
+  }finally{if(generation===selectionGeneration)loadingThread.value=false}
+}
+async function cancel(){if(!active.value)return;try{await api.cancel(active.value.session_id)}catch(e){error.value=e instanceof Error?e.message:'停止失败'}activeTurn.value=false}
 </script>
 
 <template>
-<PairingSurface v-if="!paired" :busy="pairBusy" :error="error" @pair="doPair"/>
+<PairingSurface v-if="!paired" :busy="pairBusy" :error="error" :initial-server="initialServer" @pair="doPair"/>
 <AppShell v-else :drawer-open="drawer" :sidebar-hidden="sidebarHidden" @close="drawer=false" @toggle-sidebar="toggleSidebar">
-  <template #sidebar><SessionSidebar :sessions="sessions" :active-id="active?.session_id" :loading="loadingSessions" :error="error" @select="select" @refresh="loadSessions(true)" @pin="pin" @archive="archive" @rename="renameSession" @create="createThread" @create-in-cwd="createInCwd" :busy="creatingThread" @settings="settingsOpen=true"/></template>
+  <template #sidebar><SessionSidebar :sessions="sessions" :active-id="active?.session_id" :loading="loadingSessions" :error="error" :projects="projectList" :sidebar-order="sidebarOrder" :project-order="projectOrder" @select="select" @refresh="loadSessions(true)" @pin="pin" @archive="archive" @rename="renameSession" @create="createThread" @create-in-cwd="createInCwd" @manual-create="openManualCreate" :busy="creatingThread" @settings="settingsOpen=true"/></template>
   <section class="thread-workspace">
     <ConnectionBanner :online="online" :ws="wsState" :app-server="appServer" :pending="pendingCount"/>
     <ThreadHeader :session="active" :active-turn="activeTurn" @menu="drawer=true" @rename="rename" @review="approvalOpen=true"/>
-    <ConversationTimeline :messages="messages" :events="events" :loading="loadingThread" :pending-states="pendingStates" @open-diff="openDiff"/>
-    <button v-if="pending.some(x=>x.status==='failed')" class="retry-chip" @click="retryFailed">重试发送失败的消息</button>
+    <ConversationTimeline :messages="messages" :events="events" :loading="loadingThread" :pending-states="pendingStates" :active-turn="activeTurn" @open-diff="openDiff" @edit-pending="openPendingEditor"/>
+    <div v-if="pending.some(x=>x.status==='failed'||x.status==='quarantined')" class="retry-actions">
+      <button v-if="pending.some(x=>x.status==='failed')" class="retry-chip" @click="retryFailed">重试发送失败的消息</button>
+      <button v-if="pending.some(x=>x.status==='quarantined')" class="retry-chip warning" @click="retryQuarantined">确认后重试已隔离消息</button>
+    </div>
     <ComposerBox :disabled="!active" :active-turn="activeTurn" :online="online" :queued="pendingCount" :sending="sending" :models="models" :skills="skills" :apps="apps" :defaults="defaults" :capabilities-loading="capabilitiesLoading" :cwd="active?.cwd || ''" @load-capabilities="loadCapabilities" @send="queueMessage" @cancel="cancel"/>
   </section>
   <template #overlay>
     <ApprovalSheet :approvals="approvals" :open="approvalOpen" :busy-id="approvalBusy" @close="approvalOpen=false" @decide="decideApproval"/>
     <DiffViewer :open="diffOpen" :diff="diff" :title="diffTitle" @close="diffOpen=false"/>
     <SettingsSurface :open="settingsOpen" :theme="theme" @close="settingsOpen=false" @theme="applyTheme" @unpair="unpair"/>
+    <NewThreadDialog :open="newThreadOpen" :initial="active?.cwd||''" :busy="creatingThread" :error="createError" @close="newThreadOpen=false" @create="confirmCreate"/>
+    <div v-if="editingPending" class="modal-scrim" @click.self="editingPending=null"><form class="pending-editor" @submit.prevent="savePendingEdit"><header><div><strong>编辑待发送消息</strong><small>发送会使用修改后的内容；取消该消息会将其从队列移除。</small></div><button type="button" class="icon-button" aria-label="关闭" @click="editingPending=null">×</button></header><textarea v-model="pendingEditorText" aria-label="待发送消息"></textarea><footer><button type="button" class="text-button danger-text" @click="cancelPendingMessage">取消该消息</button><span></span><button type="button" class="text-button" @click="editingPending=null">取消编辑</button><button class="primary" :disabled="!pendingEditorText.trim()">发送修改</button></footer></form></div>
   </template>
 </AppShell>
 </template>

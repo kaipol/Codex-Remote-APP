@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
-import{describe,expect,it}from'vitest';import{mount}from'@vue/test-utils';import ApprovalSheet from'./components/ApprovalSheet.vue';
+import{describe,expect,it,vi}from'vitest';import{mount}from'@vue/test-utils';import ApprovalSheet from'./components/ApprovalSheet.vue';
 import ComposerBox from'./components/ComposerBox.vue';
 import AppShell from'./components/AppShell.vue';
 import SessionSidebar from'./components/SessionSidebar.vue';
-import NewThreadDialog from'./components/NewThreadDialog.vue';
 import MessageBubble from'./components/MessageBubble.vue';
 import ConversationTimeline from'./components/ConversationTimeline.vue';
+import PairingSurface from'./components/PairingSurface.vue';
 const approval={request_id:'1:1',session_id:'s',kind:'item/commandExecution/requestApproval',payload:{command:'test'},status:'pending' as const,created_at:'x',updated_at:'x'};
+describe('pairing endpoint',()=>{
+ it('emits the normalized input pair with its server address',async()=>{const wrapper=mount(PairingSurface,{props:{busy:false,error:'',initialServer:'http://192.168.1.2:8787'}});await wrapper.findAll('input')[1].setValue('123456');await wrapper.get('button.primary').trigger('click');expect(wrapper.emitted('pair')?.[0]).toEqual(['123456','http://192.168.1.2:8787'])});
+});
 describe('approval decisions',()=>{
  it('emits an accept decision',async()=>{const wrapper=mount(ApprovalSheet,{props:{open:true,approvals:[approval]}});expect(wrapper.text()).toContain('Codex 请求确认');await wrapper.find('button.primary').trigger('click');expect(wrapper.emitted('decide')?.[0]).toEqual([approval,'accept'])});
  it('does not allow remote permission grants',()=>{const wrapper=mount(ApprovalSheet,{props:{open:true,approvals:[{...approval,kind:'item/permissions/requestApproval'}]}});expect(wrapper.text()).toContain('只能拒绝');expect(wrapper.find('button.primary').attributes('disabled')).toBeDefined()});
@@ -59,27 +62,25 @@ describe('application sidebar toggle',()=>{
 
 describe('new conversation flow',()=>{
  it('emits create from the sidebar button',async()=>{
-  const wrapper=mount(SessionSidebar,{props:{sessions:[],loading:false,error:'',busy:false}});
+  const wrapper=mount(SessionSidebar,{props:{sessions:[],loading:false,error:'',busy:false,projects:[],sidebarOrder:{},projectOrder:[]}});
   await wrapper.get('button.new-thread').trigger('click');
   expect(wrapper.emitted('create')).toHaveLength(1);
  });
- it('submits a trimmed workspace path from the dialog',async()=>{
-  const wrapper=mount(NewThreadDialog,{props:{open:true,initial:' E:\\Codex Remote APP ',busy:false,error:''}});
-  await wrapper.get('.dialog-tabs button:last-child').trigger('click');
-  await wrapper.get('.new-thread-dialog button.primary').trigger('click');
-  expect(wrapper.emitted('create')?.[0]).toEqual(['E:\\Codex Remote APP']);
+ it('emits createInCwd from a project group hover button',async()=>{
+  const wrapper=mount(SessionSidebar,{props:{sessions:[{session_id:'s1',title:'test',status:'active',pinned:false,cwd:'E:\proj',created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z'}],activeId:'s1',loading:false,error:'',busy:false,projects:[],sidebarOrder:{},projectOrder:[]}});
+  await wrapper.get('.project-new-thread').trigger('click');
+  expect(wrapper.emitted('createInCwd')?.[0]).toEqual(['E:\proj']);
  });
 });
 
 describe('message rendering controls',()=>{
  it('renders markdown math and message copy controls',async()=>{
   const wrapper=mount(MessageBubble,{props:{message:{msg_id:'m1',session_id:'s',role:'assistant',content:'**结果** $x^2$',timestamp:'2026-01-01T00:00:00Z',seq:1}}});
-  await new Promise(resolve=>setTimeout(resolve,0));
-  expect(wrapper.find('.katex').exists()).toBe(true);
+  await vi.waitFor(()=>expect(wrapper.find('.katex').exists()).toBe(true),{timeout:2000,interval:20});
   expect(wrapper.find('button.assistant-copy').exists()).toBe(true);
  });
  it('hides an explicitly interrupted turn',()=>{
-  const wrapper=mount(ConversationTimeline,{props:{messages:[{msg_id:'u1',turn_id:'t1',session_id:'s',role:'user',content:'cancelled prompt',timestamp:'2026-01-01T00:00:00Z',seq:1},{msg_id:'u2',turn_id:'t2',session_id:'s',role:'user',content:'kept prompt',timestamp:'2026-01-01T00:00:02Z',seq:3}],events:[{id:'e1',type:'turn_completed',session:'s',timestamp:'2026-01-01T00:00:01Z',seq:2,metadata:{turn_id:'t1',status:'interrupted'}}],loading:false,pendingStates:{}}});
+  const wrapper=mount(ConversationTimeline,{props:{messages:[{msg_id:'u1',turn_id:'t1',session_id:'s',role:'user',content:'cancelled prompt',timestamp:'2026-01-01T00:00:00Z',seq:1},{msg_id:'u2',turn_id:'t2',session_id:'s',role:'user',content:'kept prompt',timestamp:'2026-01-01T00:00:02Z',seq:3}],events:[{id:'e1',type:'turn_completed',session:'s',timestamp:'2026-01-01T00:00:01Z',seq:2,metadata:{turn_id:'t1',status:'interrupted'}}],loading:false,pendingStates:{},activeTurn:false}});
   expect(wrapper.text()).not.toContain('cancelled prompt');
   expect(wrapper.text()).toContain('kept prompt');
  });

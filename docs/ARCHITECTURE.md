@@ -23,11 +23,11 @@ app-server 是实时 thread/turn 的首选事实源；`CODEX_SESSIONS_DIR` rollo
 
 审批捕获 `commandExecution`、`fileChange`、`permissions`、`requestUserInput`、MCP elicitation 与旧版 exec/patch server requests。请求使用进程 epoch + 原始 JSON-RPC id 关联；决策按 Codex 0.147.0 生成的 schema 转换响应，进程重启后旧请求标记 stale，重复决策返回 409。额外权限只能远程拒绝，授予必须在主机处理。
 
-配对码生成接口仅接受 loopback 来源；CORS 默认限制为本机开发源。cwd 必须存在，经过 `realpath` 后再做 allowlist 相对路径判断；不存在路径和越界路径分别拒绝。Web 端 refresh token 仍在 `localStorage`，属于待设备密钥/安全存储替换的明确安全债务。
+配对码生成接口仅接受 loopback 来源；CORS 默认允许本机开发源与 Capacitor WebView 源。cwd 必须存在，经过 `realpath` 后再做 allowlist 相对路径判断；不存在路径和越界路径分别拒绝。Web 端 token 使用不可导出的 Web Crypto 密钥加密保存，Android 构建关闭应用备份。
 
 ## 同步
 
-Codex thread/turn/item 通知被映射成稳定 shared events，SQLite 自增 `seq` 是全局单调 cursor；保存后立即经 WebSocket 广播。详情优先 `thread/read`，失败时从 rollout 读取历史。客户端不按当前会话过滤持久化：所有事件先进入 IndexedDB，再只投影当前会话；重连先调用 `/api/sync` 补齐全局 cursor，随后按会话和创建时间重放 outbox，原始 `client_id` 保持不变以获得服务端幂等。
+Codex thread/turn/item 通知被映射成稳定 shared events，SQLite 自增 `seq` 是全局单调 cursor；保存后立即经 WebSocket 广播。详情优先 `thread/read`，失败时从 rollout 读取历史。客户端不按当前会话过滤持久化：所有事件先进入 IndexedDB，再只投影当前会话；重连先调用 `/api/sync` 补齐全局 cursor，随后按会话和创建时间重放 outbox，原始 `client_id` 保持不变以获得服务端幂等。若服务端在 Codex 已接受请求后崩溃，幂等记录会进入 `uncertain` 状态，必须先按 `client_id` 与 thread history 对账，不会自动重发造成重复 turn。
 
 ## 前端与性能边界
 

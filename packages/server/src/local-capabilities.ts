@@ -1,10 +1,19 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
 import type { AppOption, ModelOption, ReasoningEffort, SkillOption } from '@remote/shared';
 
 export async function discoverModels(codexHome:string):Promise<ModelOption[]>{
-  const configured=await configuredCatalog(codexHome);
-  const candidates=[join(codexHome,'models_cache.json'),join(codexHome,'cc-switch-model-catalog.json'),configured??join(codexHome,'model-catalogs','default.json')];
+  const source=await configSource(codexHome);
+  const defaultModel=tomlString(source,'model');
+  const configured=source?configuredCatalogPath(source,codexHome):undefined;
+  // A configured catalog is the operator's explicit model allowlist. Do not
+  // let an app-server refresh or a stale cache reorder it.
+  if(configured){const models=await readModelCatalogs([configured],defaultModel);if(models.length)return models}
+  const providerModels=await fetchProviderModels(source,defaultModel);
+  if(providerModels.length)return providerModels;
+  return readModelCatalogs([join(codexHome,'models_cache.json'),join(codexHome,'cc-switch-model-catalog.json'),join(codexHome,'model-catalogs','default.json')],defaultModel);
+}
+async function readModelCatalogs(candidates:string[],defaultModel?:string):Promise<ModelOption[]>{
   const models=new Map<string,ModelOption>();
   for(const path of candidates){
     try{
@@ -12,7 +21,7 @@ export async function discoverModels(codexHome:string):Promise<ModelOption[]>{
       for(const item of parsed.models??[]){
         const model=String(item.model??item.slug??item.id??'');if(!model)continue;
         const efforts=(item.supportedReasoningEfforts??item.supported_reasoning_levels??[]).map((x:any)=>String(x.reasoningEffort??x.effort??x)).filter(isEffort);
-        models.set(model,{id:String(item.id??model),model,displayName:String(item.displayName??item.display_name??model),description:item.description?String(item.description):undefined,isDefault:Boolean(item.isDefault),defaultReasoningEffort:effort(item.defaultReasoningEffort??item.default_reasoning_level),supportedReasoningEfforts:efforts,inputModalities:(item.inputModalities??item.input_modalities??['text']).map(String)});
+        models.set(model,{id:String(item.id??model),model,displayName:String(item.displayName??item.display_name??model),description:item.description?String(item.description):undefined,isDefault:Boolean(item.isDefault)||model===defaultModel,defaultReasoningEffort:effort(item.defaultReasoningEffort??item.default_reasoning_level),supportedReasoningEfforts:efforts,inputModalities:(item.inputModalities??item.input_modalities??['text']).map(String)});
       }
     }catch{/* optional local cache */}
   }
@@ -27,7 +36,34 @@ export function configuredCatalogPath(source:string,codexHome:string){
   if(isAbsolute(value)||/^[A-Za-z]:[\\/]/.test(value))return value;
   return dirname(value)==='.'?join(codexHome,'model-catalogs',value):join(codexHome,value);
 }
-async function configuredCatalog(codexHome:string){try{return configuredCatalogPath(await readFile(join(codexHome,'config.toml'),'utf8'),codexHome)}catch{return undefined}}
+async function configSource(codexHome:string){try{return await readFile(join(codexHome,'config.toml'),'utf8')}catch{return ''}}
+function tomlString(source:string,key:string){const match=source.match(new RegExp(`^\\s*${key}\\s*=\\s*("(?:\\\\.|[^"])*")`,'m'));if(!match)return undefined;try{return JSON.parse(match[1]) as string}catch{return match[1].slice(1,-1)}}
+function providerSettings(source:string){
+  const provider=tomlString(source,'model_provider');
+  if(!provider)return {baseUrl:tomlString(source,'openai_base_url'),environmentKey:tomlString(source,'openai_api_key_env')};
+  const header=new RegExp('(?:^|\\n)\\s*\\[model_providers\\.'+escapeRegExp(provider)+'\\]\\s*(?:\\r?\\n|$)','m').exec(source);
+  const start=header?header.index+header[0].length:0;
+  const rest=header?source.slice(start):'';
+  const end=rest.search(/^\s*\[/m);
+  const section=header?(end<0?rest:rest.slice(0,end)):undefined;
+  const baseUrl=section?tomlString(section,'base_url'):tomlString(source,'openai_base_url');
+  const environmentKey=section?tomlString(section,'env_key'):tomlString(source,'openai_api_key_env');
+  return {baseUrl,environmentKey};
+}
+function escapeRegExp(value:string){return value.replace(/[.*+?^${}()|[\\]\\]/g,'\\$&')}
+async function fetchProviderModels(source:string,defaultModel?:string):Promise<ModelOption[]>{
+  const {baseUrl:base,environmentKey}=providerSettings(source);if(!base)return [];
+  try{
+    const target=new URL('models',base.endsWith('/')?base:base+'/');
+   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);
+    const token=environmentKey?process.env[environmentKey]:undefined;
+    const response=await fetch(target,{signal:controller.signal,...(token?{headers:{authorization:'Bearer '+token}}:{})});clearTimeout(timer);
+    if(!response.ok)return [];
+    const body=await response.json() as {data?:unknown[]};
+    if(!Array.isArray(body.data))return [];
+    return body.data.flatMap((item:any)=>{const model=String(item?.id??item?.model??'');return model?[{id:model,model,displayName:String(item.display_name??item.displayName??model),description:item.description?String(item.description):undefined,isDefault:model===defaultModel,supportedReasoningEfforts:[],inputModalities:['text']} satisfies ModelOption]:[]});
+  }catch{return []}
+}
 
 export async function discoverSkills(codexHome:string):Promise<SkillOption[]>{
   const home=process.env.USERPROFILE||process.env.HOME||'';
@@ -60,8 +96,9 @@ export async function discoverApps(codexHome:string):Promise<AppOption[]>{
 }
 
 async function findNamed(root:string,name:string):Promise<string[]>{
-  const found:string[]=[];
+  const found:string[]=[];const visited=new Set<string>();
   async function walk(dir:string){
+    let canonical:string;try{canonical=await realpath(dir)}catch{return}if(visited.has(canonical))return;visited.add(canonical);
     let entries;try{entries=await readdir(dir,{withFileTypes:true})}catch{return}
     await Promise.all(entries.map(async entry=>{
       const path=join(dir,entry.name);

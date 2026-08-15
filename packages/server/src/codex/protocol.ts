@@ -47,4 +47,16 @@ export function approvalResult(method:string,decision:ApprovalDecision,answers?:
   }
 }
 export function record(value:unknown):Record<string,unknown>{return value && typeof value==='object' ? value as Record<string,unknown> : {}}
-export function text(value:unknown):string { if(typeof value==='string')return value;if(Array.isArray(value))return value.map(text).filter(Boolean).join('\n');const r=record(value);return text(r.text??r.content??r.message??r.input_text??r.output_text) }
+export function text(value:unknown,depth=0):string {
+  if(depth>5)return '';
+  if(typeof value==='string')return value;
+  if(typeof value==='number'||typeof value==='boolean')return String(value);
+  if(value===null||value===undefined)return '';
+  if(Array.isArray(value))return value.map(v=>text(v,depth+1)).filter(Boolean).join('\n');
+  const r=record(value);
+  const next=r.text??r.content??r.message??r.input_text??r.output_text;
+  // Guard against self-referential objects: if the extracted property is the
+  // same object reference, bail out to avoid infinite recursion.
+  if(next===value)return '';
+  return text(next,depth+1);
+}

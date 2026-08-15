@@ -18,6 +18,7 @@ export interface DiscoveredCodexSession extends Session {
 
 interface Entry { timestamp?: string; type?: string; payload?: Record<string, unknown> }
 interface Metadata { id: string; cwd: string; timestamp?: string }
+const DELETED_SESSIONS_DIRECTORY = '.codex-session-delete';
 
 export class CodexSessionCatalog {
   private sessions = new Map<string, DiscoveredCodexSession>();
@@ -87,26 +88,71 @@ export async function inspectRollout(filePath: string): Promise<DiscoveredCodexS
 }
 
 export async function readRolloutMessages(filePath: string, sessionId: string): Promise<Message[]> {
-  const messages: Message[] = [];
-  let seq = 1;
-  let lastKey = '';
-  const seen=new Set<string>();
+  // First pass: collect all entries and identify aborted turn ranges
+  const entries: Entry[] = [];
   for await (const line of lines(filePath)) {
     const entry = parseEntry(line);
-    if (!entry) continue;
+    if (entry) entries.push(entry);
+  }
+  // Mark entries belonging to aborted/rolled-back turns.
+  // A turn starts at task_started. If turn_aborted or thread_rolled_back occurs,
+  // the range extends from the turn start through the next task_started (exclusive)
+  // or end of file, to catch trailing token_count/settings events.
+  const abortedTurnRanges = new Set<number>();
+  let currentTurnStart = -1;
+  let abortPending = false;
+  for (let i = 0; i < entries.length; i++) {
+    const p = entries[i].payload ?? {};
+    if (entries[i].type === 'event_msg' && p.type === 'task_started') {
+      if (abortPending && currentTurnStart >= 0) {
+        for (let j = currentTurnStart; j < i; j++) abortedTurnRanges.add(j);
+      }
+      currentTurnStart = i;
+      abortPending = false;
+    } else if (entries[i].type === 'event_msg' && (p.type === 'turn_aborted' || p.type === 'thread_rolled_back')) {
+      if (currentTurnStart >= 0) {
+        for (let j = currentTurnStart; j <= i; j++) abortedTurnRanges.add(j);
+        abortPending = true;
+      }
+    }
+  }
+  if (abortPending && currentTurnStart >= 0) {
+    for (let j = currentTurnStart; j < entries.length; j++) abortedTurnRanges.add(j);
+  }
+  // Second pass: build messages, skipping aborted-turn entries.
+  // Match representations by stable item IDs first, then by a shared turn ID
+  // for the known event_msg/response_item pair. Content and timestamps alone
+  // are deliberately not enough: adjacent turns may repeat the same prompt.
+  const messages: Message[] = [];
+  let seq = 1;
+  const msgByKey = new Map<string, { messageIndex:number; entryIndex:number; source:string; timestamp:number; itemId?:string; turnId?:string }>();
+  for (let i = 0; i < entries.length; i++) {
+    if (abortedTurnRanges.has(i)) continue;
+    const entry = entries[i];
     const value = messageFromEntry(entry);
-    if (!value || !value.content.trim() || value.role==='assistant'&&isContextSummary(value.content)) continue;
+    if (!value || !value.content.trim() && !(value.references?.length) || value.role === 'assistant' && isContextSummary(value.content)) continue;
     const key = `${value.role}\u0000${value.content}`;
-    // Codex commonly records the same message as event_msg and response_item consecutively.
-    if (key === lastKey||seen.has(key)) continue;
-    lastKey = key;
-    seen.add(key);
+    const previous = msgByKey.get(key);
+    const timestamp=timeValue(entry.timestamp);
+    const sameItem=Boolean(previous?.itemId&&value.itemId&&previous.itemId===value.itemId);
+    const sameTurnRepresentation=Boolean(previous?.turnId&&value.turnId&&previous.turnId===value.turnId&&isMessageRepresentationPair(previous.source,entry.type));
+    if (previous && (sameItem || sameTurnRepresentation)) {
+      const existing = messages[previous.messageIndex];
+      const existingHasUrl = existing.references?.some(r => r.url) ?? false;
+      const newHasUrl = value.references?.some(r => r.url) ?? false;
+      if (newHasUrl && !existingHasUrl) {
+        messages[previous.messageIndex] = { ...existing, references: value.references, timestamp: validDate(entry.timestamp) ?? existing.timestamp };
+      }
+      msgByKey.set(key,{messageIndex:previous.messageIndex,entryIndex:i,source:entry.type??'',timestamp,itemId:value.itemId,turnId:value.turnId});
+      continue;
+    }
+    msgByKey.set(key, {messageIndex:messages.length,entryIndex:i,source:entry.type??'',timestamp,itemId:value.itemId,turnId:value.turnId});
     messages.push({
       msg_id: `${sessionId}:${seq}`,
       session_id: sessionId,
       role: value.role,
       content: value.content,
-      ...(value.references?.length?{references:value.references}:{}),
+      ...(value.references?.length ? { references: value.references } : {}),
       timestamp: validDate(entry.timestamp) ?? new Date(0).toISOString(),
       seq: seq++,
     });
@@ -127,7 +173,10 @@ async function findRollouts(root: string): Promise<string[]> {
     try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
     await Promise.all(entries.map(async entry => {
       const path = join(dir, entry.name);
-      if (entry.isDirectory()) return walk(path);
+      if (entry.isDirectory()) {
+        if (entry.name.toLowerCase() === DELETED_SESSIONS_DIRECTORY) return;
+        return walk(path);
+      }
       if (entry.isFile() && /^rollout-.*\.jsonl(?:\.gz|\.zst)?$/i.test(entry.name)) found.push(path);
     }));
   }
@@ -171,19 +220,24 @@ function parseMetadata(payload: Record<string, unknown> | undefined): Metadata |
   return { id, cwd, timestamp: string(payload.timestamp) };
 }
 
-function messageFromEntry(entry: Entry): { role: 'user' | 'assistant'; content: string; references?:MessageReference[] } | undefined {
+function messageFromEntry(entry: Entry): { role: 'user' | 'assistant'; content: string; references?:MessageReference[]; itemId?:string; turnId?:string } | undefined {
   const payload = entry.payload;
   if (!payload) return undefined;
+  const itemId=string(payload.id);
+  const turnId=string(payload.turn_id??payload.turnId);
+  const withIdentity=(message:{role:'user'|'assistant';content:string;references?:MessageReference[]}|undefined)=>message?{...message,...(itemId?{itemId}:{}),...(turnId?{turnId}:{})}:undefined;
   if (entry.type === 'event_msg') {
-    if (payload.type === 'user_message') return textMessage('user', payload.message ?? payload.text ?? payload.content);
-    if (payload.type === 'agent_message' || payload.type === 'assistant_message') return textMessage('assistant', payload.message ?? payload.text ?? payload.content);
+    if (payload.type === 'user_message') return withIdentity(textMessage('user', payload.message ?? payload.text ?? payload.content));
+    if (payload.type === 'agent_message' || payload.type === 'assistant_message') return withIdentity(textMessage('assistant', payload.message ?? payload.text ?? payload.content));
   }
   if (entry.type === 'response_item' && payload.type === 'message') {
     const role = payload.role === 'user' ? 'user' : payload.role === 'assistant' ? 'assistant' : undefined;
-    if (role) return textMessage(role, payload.content ?? payload.message ?? payload.text);
+    if (role) return withIdentity(textMessage(role, payload.content ?? payload.message ?? payload.text));
   }
   return undefined;
 }
+
+function isMessageRepresentationPair(a:string|undefined,b:string|undefined){return (a==='event_msg'&&b==='response_item')||(a==='response_item'&&b==='event_msg');}
 
 function textMessage(role: 'user' | 'assistant', value: unknown) {
   const raw=extractText(value),parsed=role==='user'?parseUserContent(raw):{content:raw,references:[]};
@@ -191,19 +245,33 @@ function textMessage(role: 'user' | 'assistant', value: unknown) {
   return content||parsed.references.length ? { role, content, ...(parsed.references.length?{references:parsed.references}:{}) } : undefined;
 }
 
-function extractText(value: unknown): string {
+export function extractText(value: unknown): string {
   if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return value.filter(item=>{const type=string((item as Record<string,unknown>)?.type);return !type||['input_text','output_text','text'].includes(type)}).map(extractText).filter(Boolean).join('\n');
+  if (Array.isArray(value)) return value.map(item => {
+    const type = string((item as Record<string, unknown>)?.type);
+    if (type === 'input_image') {
+      const url = string((item as Record<string, unknown>).image_url);
+      return url ? '<image_data url="' + url + '">' : '';
+    }
+    if (!type || ['input_text', 'output_text', 'text'].includes(type)) return extractText(item);
+    return '';
+  }).filter(Boolean).join('\n');
   if (!value || typeof value !== 'object') return '';
   const item = value as Record<string, unknown>;
   return extractText(item.text ?? item.input_text ?? item.output_text ?? item.content ?? item.message);
 }
 
 export function cleanConversationText(value:string,role:'user'|'assistant'='user'):string{
-  if(role==='assistant')return value;
-  return value
+  if(role==='assistant')return value.replace(/\r\n/g,'\n');
+  return value.replace(/\r\n/g,'\n').replace(/\r/g,'\n')
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi,'')
     .replace(/<turn_aborted>[\s\S]*?<\/turn_aborted>/gi,'')
+    .replace(/<recommended_plugins>[\s\S]*?<\/recommended_plugins>/gi,'')
+    .replace(/<app-context>[\s\S]*?<\/app-context>/gi,'')
+    .replace(/<skills_instructions>[\s\S]*?<\/skills_instructions>/gi,'')
+    .replace(/<permissions_instructions>[\s\S]*?<\/permissions_instructions>/gi,'')
+    .replace(/<collaboration_mode>[\s\S]*?<\/collaboration_mode>/gi,'')
+    .replace(/<memory>[\s\S]*?<\/memory>/gi,'')
     .replace(/(?:^|\n)# AGENTS\.md instructions[\s\S]*?(?=\n# (?:Files mentioned|My request|User request)|$)/gi,'\n')
     .replace(/(?:^|\n)# Chrome tabs:[\s\S]*?(?=\n#{1,3}\s|$)/gi,'\n')
     .replace(/(?:^|\n)<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/gi,'\n')
@@ -217,7 +285,15 @@ export function parseUserContent(value:string):{content:string;references:Messag
   if(files)for(const match of files[1].matchAll(/(?:^|\n)##\s*([^:\n]+):\s*([^\n]+)/g))references.push({type:'file',label:match[1].trim(),path:match[2].trim()});
   const skill=value.match(/(?:^|\n)#{1,3}\s*My request for Codex:\s*\[\$([^\]\n]+)\]\s*(?:\(([^)]+)\))?/i);
   if(skill)references.push({type:'skill',label:skill[1].trim(),...(skill[2]?{path:skill[2].trim()}:{})});
-  for(const match of value.matchAll(/<image\s+name=\[?([^\]\n]+)\]?\s+path="([^"]+)">[\s\S]*?<\/image>/gi)){const path=match[2].trim(),label=path.replace(/\\/g,'/').split('/').filter(Boolean).at(-1)||match[1].trim();references.push({type:'file',label,path})}
+  // Match <image> tags with either plain or backslash-escaped quotes around path/url values
+  for(const match of value.matchAll(/<image\s+name=\[?([^\]\n]+)\]?\s+path=\\?"([^"]+)\\?">[\s\S]*?<\/image>/gi)){
+    const path=match[2].trim();
+    const label=path.replace(/\\/g,'/').split('/').filter(Boolean).at(-1)||match[1].trim();
+    const inner=match[0];
+    const dataMatch=inner.match(/<image_data url=\\?"([^"]+)\\?">/i);
+    const url=dataMatch?dataMatch[1].trim():undefined;
+    references.push({type:'file',label,path,...(url?{url}:{})});
+  }
   const annotations=value.match(/<response-annotations>\s*([\s\S]*?)\s*<\/response-annotations>/i);
   if(annotations){try{const items=JSON.parse(annotations[1]) as Array<{text?:unknown;comment?:unknown}>;items.forEach((item,index)=>{const detail=String(item.text??'').trim(),comment=String(item.comment??'').trim();references.push({type:'annotation',label:`${index+1} 条注释`,detail:[detail,comment].filter(Boolean).join('\n\n')})})}catch{/* malformed annotation payload */}}
   const content=value
@@ -225,11 +301,18 @@ export function parseUserContent(value:string):{content:string;references:Messag
     .replace(/(?:^|\n)# Files mentioned by the user:\s*[\s\S]*?(?=\n#{1,3}\s*(?:My request|User request)|$)/i,'\n')
     .replace(/(?:^|\n)#{1,3}\s*My request for Codex:\s*\[\$[^\]\n]+\]\s*(?:\([^)]+\))?\s*/i,'\n')
     .replace(/(?:^|\n)# Response annotations:[\s\S]*?<response-annotations>[\s\S]*?<\/response-annotations>/i,'\n')
-    .replace(/<image\s+name=\[?[^\]\n]+\]?\s+path="[^"]+">[\s\S]*?<\/image>/gi,'\n')
+    .replace(/<image\s+name=\[?[^\]\n]+\]?\s+path=\\?"[^"]+\\?">[\s\S]*?<\/image>/gi,'\n')
     .replace(/(?:^|\n)#{1,3}\s*(?:My request(?: for Codex)?|User request):\s*/i,'\n')
     .trim();
-  const seen=new Set<string>();
-  return {content,references:references.filter(item=>{const key=`${item.type}:${item.path||item.label}`;if(seen.has(key))return false;seen.add(key);return true})};
+  const normRefKey = (item: MessageReference) => `${item.type}:${(item.path || item.label || '').replace(/\\/g, '/').toLowerCase()}`;
+  const seen = new Map<string, MessageReference>();
+  for (const item of references) {
+    const key = normRefKey(item);
+    const existing = seen.get(key);
+    if (!existing) { seen.set(key, item); }
+    else if (item.url && !existing.url) { seen.set(key, { ...existing, url: item.url }); }
+  }
+  return { content, references: [...seen.values()] };
 }
 
 function historyEvent(kind:string,p:Record<string,unknown>):Pick<BridgeEvent,'type'|'content'|'metadata'>|undefined{
@@ -248,7 +331,7 @@ function historyEvent(kind:string,p:Record<string,unknown>):Pick<BridgeEvent,'ty
 function isToolCall(kind:string){return kind==='function_call'||kind==='custom_tool_call'||kind==='tool_search_call'}
 function isToolResult(kind:string){return kind==='function_call_output'||kind==='custom_tool_call_output'||kind==='tool_search_output'}
 function parseArguments(value:unknown):unknown{if(typeof value!=='string')return value;try{return JSON.parse(value)}catch{return value}}
-function extractToolOutput(value:unknown):string{if(typeof value==='string')return stripAnsi(value);if(!value||typeof value!=='object')return '';const r=value as Record<string,unknown>;return stripAnsi(extractText(r.content??r.output??r.text??r))}
+function extractToolOutput(value:unknown):string{if(typeof value==='string')return stripAnsi(value);if(!value||typeof value!=='object')return '';const r=value as Record<string, unknown>;return stripAnsi(extractText(r.content??r.output??r.text??r))}
 function stripAnsi(value:string){return value.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g,'')}
 
 function isUsefulUserText(text: string): boolean {
