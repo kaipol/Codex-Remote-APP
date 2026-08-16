@@ -147,7 +147,8 @@ export const api={
   cwdRoots:()=>call<string[]>('/api/capabilities/cwd-roots'),
   projects:()=>call<{projects:ProjectInfo[];sidebarOrder:Record<string,string[]>;projectOrder:string[]}>('/api/projects')
   ,fileSearch:(query:string,roots:string)=>call<FileSearchResult[]>(`/api/files/search?query=${encodeURIComponent(query)}&roots=${encodeURIComponent(roots)}`),
-  readDirectory:(path:string)=>call<{fileName:string;isDirectory:boolean;isFile:boolean}[]>(`/api/files/list?path=${encodeURIComponent(path)}`)
+  readDirectory:(path:string)=>call<{fileName:string;isDirectory:boolean;isFile:boolean}[]>(`/api/files/list?path=${encodeURIComponent(path)}`),
+  openPath:(path:string)=>call<void>('/api/files/open',{method:'POST',body:JSON.stringify({path})})
 };
 
 export function connect(onMessage:(m:WsEnvelope)=>void){

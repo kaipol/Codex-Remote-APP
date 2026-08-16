@@ -2,6 +2,7 @@ node_modules/
 dist/
 coverage/
 data/
+**/.token-secret
 .env
 .references/
 packages/web/public/sw.js

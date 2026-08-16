@@ -55,7 +55,8 @@ export class Store {
 	 device(id:string){return this.db.prepare('SELECT * FROM devices WHERE id=? AND revoked_at IS NULL').get(id) as any}
 	 rotateDevice(id:string,hash:string){this.db.prepare('UPDATE devices SET refresh_hash=?,last_seen_at=? WHERE id=?').run(hash,new Date().toISOString(),id)}
 	 revokeDevice(id:string){return this.db.prepare('UPDATE devices SET revoked_at=? WHERE id=? AND revoked_at IS NULL').run(new Date().toISOString(),id).changes>0}
- close(){this.db.close()}
+	 revokeAllDevices(){return this.db.prepare('UPDATE devices SET revoked_at=? WHERE revoked_at IS NULL').run(new Date().toISOString()).changes}
+	 close(){this.db.close()}
 }
 function rowEvent(r:any):BridgeEvent{return {...JSON.parse(r.payload),seq:r.seq}}
 function approvalRow(r:any){const {raw_id,epoch,...rest}=r;return {...rest,payload:JSON.parse(r.payload),raw_id:safeJson(raw_id),epoch:Number(epoch??0)}}

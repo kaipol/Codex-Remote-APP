@@ -10,6 +10,15 @@ describe('AppServerProcess command resolution',()=>{
     ])).toBe('C:\\Apps\\codex.exe');
   });
 
+  it('skips MSIX-packaged executables under WindowsApps and prefers the npm shim',()=>{
+    expect(selectWindowsCommand('codex',[
+      'D:\\Scoop\\apps\\nodejs\\current\\bin\\codex',
+      'D:\\Scoop\\apps\\nodejs\\current\\bin\\codex.cmd',
+      'C:\\Program Files\\WindowsApps\\OpenAI.Codex_x64__hash\\app\\resources\\codex',
+      'C:\\Program Files\\WindowsApps\\OpenAI.Codex_x64__hash\\app\\resources\\codex.exe'
+    ])).toBe('D:\\Scoop\\apps\\nodejs\\current\\bin\\codex.cmd');
+  });
+
   it('keeps executable commands direct',()=>{
     expect(createSpawnSpec('C:\\Apps\\codex.exe',['app-server'],'win32')).toEqual({
       command:'C:\\Apps\\codex.exe',

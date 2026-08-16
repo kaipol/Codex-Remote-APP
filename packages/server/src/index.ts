@@ -4,6 +4,9 @@ export function bootstrap(overrides={}){
   const config=loadConfig(overrides);
   const store=new Store(config.databasePath);
   const auth=new AuthService(store,config);
+  // A service restart starts a new trust session. Browser reloads keep their
+  // encrypted local token, but the next request must pair against this process.
+  auth.invalidateDevicesOnStartup();
   const sessions=new SessionService(store,config);
   const server=createServer(createApp(store,auth,sessions,config));
   const ws=attachWs(server,auth,store,config.corsOrigins);
@@ -11,7 +14,13 @@ export function bootstrap(overrides={}){
   sessions.manager.on('event',event=>{publishQueue=publishQueue.then(async()=>{if(await sessions.canAccessEvent(event))ws.publish(event)}).catch(error=>console.warn('[remote:event] authorization failed',error))});
   // Log codex app-server lifecycle events for debugging
   sessions.manager.on('debug',(info:any)=>{console.log('[codex]',info.kind,info.method??'')});
-  sessions.manager.rpc.on('stderr',(line:string)=>{console.error('[codex:stderr]',line)});
+  sessions.manager.rpc.on('stderr',(line:string)=>{
+    // The Codex process writes both actual app-server errors and ordinary MCP
+    // server log lines to stderr. Logging every MCP message as an error makes
+    // successful turns look broken in the console.
+    if(line.includes('codex_rmcp_client::logging_client_handler: MCP server log message'))console.debug('[codex:mcp]',line);
+    else console.error('[codex:stderr]',line);
+  });
   sessions.manager.rpc.on('unavailable',(error:Error)=>{console.error('[codex] app-server unavailable:',error.message)});
   sessions.manager.rpc.on('malformed',(line:string)=>{console.warn('[codex:malformed]',line)});
   void sessions.refresh();

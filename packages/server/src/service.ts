@@ -1,6 +1,7 @@
 import type { AppOption, FileSearchResult, RuntimeConfig, Session, SessionDetail, SessionStatus, SkillOption, UserInput } from '@remote/shared';
+import { spawn } from 'node:child_process';
 import { readFile, realpath } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Config } from './config.js';
 import type { Store } from './db.js';
 import { cleanConversationText, CodexSessionCatalog, extractText, parseUserContent } from './codex-sessions.js';
@@ -25,30 +26,56 @@ export class SessionService {
     this.manager = manager ?? new CodexManager(config, store);
     this.desktopState = new DesktopStateReader(config.codexHome);
   }
-  private canonicalRoots(includeCodexHome=false){
-    const cached=includeCodexHome?this.skillRoots:this.cwdRoots;
-    if(cached)return cached;
-    const home=process.env.USERPROFILE||process.env.HOME||'';
-    const roots=includeCodexHome?[...this.cwdAllowlist,this.codexHome,...(home?[join(home,'.agents','skills')]:[]),join(this.codexHome,'plugins','cache')]:this.cwdAllowlist;
-    const pending=Promise.all(roots.map(root=>realpath(resolve(root)).catch(()=>undefined))).then(values=>[...new Set(values.filter((value):value is string=>Boolean(value)))]);
-    if(includeCodexHome)this.skillRoots=pending;else this.cwdRoots=pending;
-    return pending;
+  private normalizeCwd(cwd:string){return cwd.replace(/^\\\\\?\\/,'')}
+  private pathAllowed(candidate:string,roots:string[]){return roots.some(root=>{const value=relative(root,candidate);return value===''||value!=='..'&&!value.startsWith(`..${sep}`)&&!isAbsolute(value)})}
+  private async desktopRoots():Promise<string[]>{
+    const candidates=new Set<string>();
+    for(const project of await this.desktopState.getProjectsAsync())for(const root of project.rootPaths||[])if(root)candidates.add(this.normalizeCwd(root));
+    for(const cwd of (await this.desktopState.getThreadCwdHints()).values())if(cwd)candidates.add(this.normalizeCwd(cwd));
+    for(const thread of this.desktopState.getDbThreads())if(thread.cwd&&!thread.archived)candidates.add(this.normalizeCwd(thread.cwd));
+    return Promise.all([...candidates].map(root=>realpath(resolve(root)).catch(()=>undefined))).then(values=>[...new Set(values.filter((value):value is string=>Boolean(value)))]);
   }
-	 private async requireAllowedPath(path:string,includeCodexHome=false){
+  private async canonicalRoots(includeCodexHome=false):Promise<string[]>{
+    if(includeCodexHome){
+      if(this.skillRoots)return this.skillRoots;
+      const home=process.env.USERPROFILE||process.env.HOME||'';
+      const base=[...this.cwdAllowlist,this.codexHome,...(home?[join(home,'.agents','skills')]:[]),join(this.codexHome,'plugins','cache')];
+      const pending=Promise.all(base.map(root=>realpath(resolve(root)).catch(()=>undefined))).then(values=>[...new Set(values.filter((value):value is string=>Boolean(value)))]);
+      this.skillRoots=pending;return pending;
+    }
+    if(!this.cwdRoots){
+      this.cwdRoots=Promise.all(this.cwdAllowlist.map(root=>realpath(resolve(root)).catch(()=>undefined))).then(values=>[...new Set(values.filter((value):value is string=>Boolean(value)))]);
+    }
+    const [staticRoots,desktop]=await Promise.all([this.cwdRoots,this.desktopRoots()]);
+    return [...new Set([...staticRoots,...desktop])];
+  }
+  private async requireAllowedPath(path:string,includeCodexHome=false){
     let candidate:string;
-    try{candidate=await realpath(resolve(path))}catch{throw Object.assign(new Error('path must exist'),{status:400})}
+    try{candidate=await realpath(resolve(this.normalizeCwd(path)))}catch{throw Object.assign(new Error('path must exist'),{status:400})}
     const roots=await this.canonicalRoots(includeCodexHome);
-    const allowed=roots.some(root=>{const value=relative(root,candidate);return value===''||value!=='..'&&!value.startsWith(`..${sep}`)&&!isAbsolute(value)});
-    if(!allowed)throw Object.assign(new Error('path is outside CODEX_CWD_ALLOWLIST'),{status:403});
-	   return candidate;
-	 }
-	 private async isAllowedPath(path:string|undefined,includeCodexHome=false){if(!path)return false;try{await this.requireAllowedPath(path,includeCodexHome);return true}catch{return false}}
+    if(!this.pathAllowed(candidate,roots))throw Object.assign(new Error('path is outside CODEX_CWD_ALLOWLIST'),{status:403});
+    return candidate;
+  }
+  private async isAllowedPath(path:string|undefined,includeCodexHome=false){if(!path)return false;try{await this.requireAllowedPath(path,includeCodexHome);return true}catch{return false}}
+  private isProjectIdCwd(cwd:string,projectId?:string):boolean{const normalized=this.normalizeCwd(cwd);return Boolean(projectId)&&(normalized===projectId||basename(normalized)===projectId)}
+  private bestCwd(projectId:string|undefined,...candidates:(string|undefined)[]):string{for(const candidate of candidates){if(!candidate)continue;const normalized=this.normalizeCwd(candidate);if(!isAbsolute(normalized))continue;if(this.isProjectIdCwd(normalized,projectId))continue;return normalized}return candidates.find(candidate=>Boolean(candidate))||''}
+  private async effectiveCwd(id:string,cwd?:string):Promise<string|undefined>{
+    const projectMap=await this.desktopState.getThreadProjectMap();
+    const assigned=projectMap.get(id);
+    if(cwd){const normalized=this.normalizeCwd(cwd);if(isAbsolute(normalized)&&!this.isProjectIdCwd(normalized,assigned?.projectId))return normalized}
+    if(assigned){
+      const projectRoots=await this.desktopState.getProjectRootMap();
+      const root=projectRoots.find(project=>project.projectId===assigned.projectId)?.rootPath;
+      if(root)return root;
+    }
+    return (await this.desktopState.getThreadCwdHints()).get(id);
+  }
   private rememberSessionAccess(id:string,allowed:boolean){this.sessionAccess.set(id,allowed);return allowed}
   async canAccessSession(id:string,cwdHint?:string,forceRefresh=false):Promise<boolean>{
     if(cwdHint!==undefined)return this.rememberSessionAccess(id,await this.isAllowedPath(cwdHint));
     const cached=this.sessionAccess.get(id);if(!forceRefresh&&cached!==undefined)return cached;
     const existing=this.sessionAccessChecks.get(id);if(existing)return existing;
-    const pending=(async()=>{try{const thread=await this.manager.read(id);return this.rememberSessionAccess(id,await this.isAllowedPath(thread.cwd))}catch{await this.catalog.refresh();const detail=await this.catalog.detail(id);return this.rememberSessionAccess(id,Boolean(detail&&await this.isAllowedPath(detail.cwd)))}})().finally(()=>this.sessionAccessChecks.delete(id));
+    const pending=(async()=>{try{const thread=await this.manager.read(id,false);const cwd=await this.effectiveCwd(id,thread.cwd);return this.rememberSessionAccess(id,await this.isAllowedPath(cwd))}catch{await this.catalog.refresh();const detail=await this.catalog.detail(id);const cwd=await this.effectiveCwd(id,detail?.cwd);return this.rememberSessionAccess(id,Boolean(detail&&cwd&&await this.isAllowedPath(cwd)))}})().finally(()=>this.sessionAccessChecks.delete(id));
     this.sessionAccessChecks.set(id,pending);return pending;
   }
   async canAccessEvent(event:{session:string;type?:string;metadata?:Record<string,unknown>}){
@@ -116,8 +143,15 @@ export class SessionService {
     const enrichedWithGhosts = [...enriched, ...ghostProjectless, ...ghostSidebar];
 	   const visible=this.merge(enrichedWithGhosts).filter(session => session.status !== 'archived' && !deletedIds.has(session.session_id));
     for(const id of deletedIds)this.sessionAccess.set(id,false);
-    const allowed=await Promise.all(visible.map(async session=>this.rememberSessionAccess(session.session_id,await this.isAllowedPath(session.cwd))?session:undefined));
-	   return allowed.filter((session):session is Session=>Boolean(session));
+    const roots=await this.canonicalRoots(false);
+    const allowed:Session[]=[];
+    for(const session of visible){
+      let ok=false;
+      if(session.cwd){try{ok=this.pathAllowed(await realpath(resolve(this.normalizeCwd(session.cwd))),roots)}catch{ok=false}}
+      this.rememberSessionAccess(session.session_id,ok);
+      if(ok)allowed.push(session);
+    }
+	   return allowed;
   }
   async refresh(): Promise<Session[]> { return this.list(); }
   async create(cwd: string,runtime:RuntimeConfig={}): Promise<Session> {
@@ -129,19 +163,36 @@ export class SessionService {
     return this.applyOverlay(this.withProject(created, projectMap, projectRoots));
   }
 	 async detail(id: string): Promise<SessionDetail | undefined> {
-	   try {
-      const thread = await this.manager.read(id);
-      if(!this.rememberSessionAccess(id,await this.isAllowedPath(thread.cwd)))return undefined;
-      this.store.ensureSession(thread);
-      const session = this.applyOverlay(this.fromThread(thread));
-      const messages = (thread.turns ?? []).flatMap((turn,turnIndex) => (turn.items ?? []).map((item,itemIndex) => {if(item.type!=='userMessage'&&item.type!=='agentMessage')return null;const role=(item.type==='userMessage'?'user':'assistant') as 'user'|'assistant';const parsed=role==='user'?parseUserContent(extractText(item.content)):{content:String(item.text??''),references:[]};const clientId=role==='user'&&typeof item.clientId==='string'?item.clientId:role==='user'&&typeof item.clientUserMessageId==='string'?item.clientUserMessageId:undefined;return {msg_id:item.id,...(clientId?{client_id:clientId}:{}),turn_id:turn.id,session_id:id,role,content:cleanConversationText(parsed.content,role),...(parsed.references.length?{references:parsed.references}:{}),timestamp:session.updated_at,seq:turnIndex*1000+itemIndex+1}}).filter((m):m is NonNullable<typeof m>=>m!==null).filter(message=>(message.content.trim()||message.references?.length)&&!isContextSummary(message.content)));
-	     const historyEvents=(thread.turns??[]).flatMap((turn,turnIndex)=>(turn.items??[]).flatMap((item,itemIndex)=>eventFromItem(id,turn.id,item,session.updated_at,turnIndex*1000+itemIndex+1)));
-	     return {...session,messages,events:mergeEvents(historyEvents,this.store.eventsForSession(id))};
-	   } catch {
-      const detail = await this.catalog.detail(id);
-      const allowed=Boolean(detail&&await this.isAllowedPath(detail.cwd));this.sessionAccess.set(id,allowed);
-      return detail&&allowed ? { ...this.applyOverlay(detail), messages: detail.messages, events: mergeEvents(detail.events,this.store.eventsForSession(id)) } : undefined;
-    }
+      // Prefer the durable rollout as the authoritative message history. The
+      // app-server can return a compacted/partial view of a thread and drops
+      // pasted image data URLs, which regresses the web client's history and
+      // image rendering. The rollout always carries the full history and the
+      // original image references.
+      const [rollout, thread] = await Promise.all([
+        this.catalog.detail(id).catch(() => undefined),
+        this.manager.read(id).catch(() => undefined),
+      ]);
+      const cwd = await this.effectiveCwd(id, thread?.cwd ?? rollout?.cwd);
+      if (!cwd || !this.rememberSessionAccess(id, await this.isAllowedPath(cwd))) return undefined;
+      if (rollout) {
+        const session = this.applyOverlay({ ...rollout, cwd });
+        return { ...session, messages: rollout.messages, events: mergeEvents(rollout.events, this.store.eventsForSession(id)) };
+      }
+      if (thread) {
+        this.store.ensureSession(thread);
+        const session = this.applyOverlay(this.fromThread(thread));
+        if (cwd) session.cwd = cwd;
+        const messages = (thread.turns ?? []).flatMap((turn, turnIndex) => (turn.items ?? []).map((item, itemIndex) => {
+          if (item.type !== 'userMessage' && item.type !== 'agentMessage') return null;
+          const role = (item.type === 'userMessage' ? 'user' : 'assistant') as 'user' | 'assistant';
+          const parsed = role === 'user' ? parseUserContent(extractText(item.content)) : { content: String(item.text ?? ''), references: [] };
+          const clientId = role === 'user' && typeof item.clientId === 'string' ? item.clientId : role === 'user' && typeof item.clientUserMessageId === 'string' ? item.clientUserMessageId : undefined;
+          return { msg_id: item.id, ...(clientId ? { client_id: clientId } : {}), turn_id: turn.id, session_id: id, role, content: cleanConversationText(parsed.content, role), ...(parsed.references.length ? { references: parsed.references } : {}), timestamp: session.updated_at, seq: turnIndex * 1000 + itemIndex + 1 };
+        }).filter((m): m is NonNullable<typeof m> => m !== null).filter(message => (message.content.trim() || message.references?.length) && !isContextSummary(message.content)));
+        const historyEvents = (thread.turns ?? []).flatMap((turn, turnIndex) => (turn.items ?? []).flatMap((item, itemIndex) => eventFromItem(id, turn.id, item, session.updated_at, turnIndex * 1000 + itemIndex + 1)));
+        return { ...session, messages, events: mergeEvents(historyEvents, this.store.eventsForSession(id)) };
+      }
+      return undefined;
   }
   async update(id: string, changes: { title?: string; status?: SessionStatus; pinned?: boolean }): Promise<Session | undefined> { const detail=await this.detail(id);if(!detail)return undefined;if(changes.title)await this.manager.rename(id,changes.title).catch(()=>{});if(changes.status==='archived'||detail.status==='archived'&&changes.status==='active')await this.manager.archive(id,changes.status==='archived').catch(()=>{});this.store.updateOverlay(id,changes);return this.applyOverlay(detail) }
   async removeOverlay(id: string): Promise<boolean> { if(!await this.detail(id))return false;this.store.deleteOverlay(id);return true }
@@ -174,6 +225,17 @@ export class SessionService {
   async defaults(){const defaults=await this.manager.defaults();return {...defaults,sandbox:defaults.sandbox==='danger-full-access'&&!this.allowDangerFullAccess?'workspace-write':defaults.sandbox,allowDangerFullAccess:this.allowDangerFullAccess}}
   async fileSearch(query:string,roots:string[]):Promise<FileSearchResult[]>{if(!roots.length)throw Object.assign(new Error('at least one search root is required'),{status:400});return this.manager.fileSearch(query,await Promise.all(roots.map(root=>this.requireAllowedPath(root))))}
   async readDirectory(path:string){return this.manager.readDirectory(await this.requireAllowedPath(path))}
+  async openPath(path:string){
+    const allowedPath=await this.requireAllowedPath(path,true);
+    const platform=process.platform;
+    const command=platform==='win32'?'explorer.exe':platform==='darwin'?'open':'xdg-open';
+    const args=platform==='win32'?[allowedPath]:[allowedPath];
+    await new Promise<void>((resolve,reject)=>{
+      const child=spawn(command,args,{detached:true,stdio:'ignore'});
+      child.once('error',reject);
+      child.once('spawn',()=>{child.unref();resolve()});
+    });
+  }
   async sync(cursor:number,clientStreamId?:string){const latest=this.store.latestCursor();const reset=Boolean(clientStreamId&&clientStreamId!==this.store.streamId)||(!clientStreamId&&cursor>0)||cursor>latest;const start=reset?0:cursor;const page=this.store.eventsAfter(start);const events=[];for(const event of page)if(await this.canAccessEvent(event))events.push(event);const next=page.at(-1)?.seq??start;return {cursor:next,events,stream_id:this.store.streamId,...(reset?{reset:true}:{}),has_more:next<latest}}
 	 async projects(){const projects=await this.desktopState.getProjectsAsync();const visibleProjects=[] as typeof projects;for(const project of projects){const roots=(await Promise.all(project.rootPaths.map(async root=>await this.isAllowedPath(root)?root:undefined))).filter((root):root is string=>Boolean(root));if(roots.length)visibleProjects.push({...project,rootPaths:roots})}const allowedIds=new Set((await this.list()).map(session=>session.session_id));const sidebarOrderMap=await this.desktopState.getSidebarThreadOrder();const sidebarOrder=Object.fromEntries([...sidebarOrderMap].map(([key,ids])=>[key,ids.filter(id=>allowedIds.has(id))]));const allowedProjects=new Set(visibleProjects.map(project=>project.id));const projectOrder=(await this.desktopState.getProjectOrder()).filter(id=>allowedProjects.has(id));return {projects:visibleProjects,sidebarOrder,projectOrder}}
   async approvals(sessionId?:string){if(sessionId)await this.requireAllowedSession(sessionId);const approvals=this.store.listApprovals(sessionId);if(sessionId)return approvals.map(publicApproval);const allowed=await Promise.all(approvals.map(async approval=>await this.canAccessSession(approval.session_id)?approval:undefined));return allowed.filter((approval):approval is NonNullable<typeof approval>=>Boolean(approval)).map(publicApproval)}
@@ -182,9 +244,12 @@ export class SessionService {
   private fromThread(t:CodexThread):Session {this.store.ensureSession(t);return {session_id:t.id,title:t.name||t.preview||`Codex ${t.id}`,status:'active',pinned:false,cwd:t.cwd,created_at:new Date(t.createdAt*1000).toISOString(),updated_at:new Date(t.updatedAt*1000).toISOString(),...(t.path?{rollout_path:t.path}:{})}}
   private withProject(session:Session, projectMap:Map<string,{projectId:string;projectName:string;cwd?:string}>, projectRoots:Array<{projectId:string;projectName:string;rootPath:string}>):Session {
     const assigned = projectMap.get(session.session_id);
-    if (assigned) return {...session,project_id:assigned.projectId,project_name:assigned.projectName,cwd:session.cwd||assigned.cwd||''};
+    if (assigned) {
+      const rootPath = projectRoots.find(project => project.projectId === assigned.projectId)?.rootPath;
+      return {...session,project_id:assigned.projectId,project_name:assigned.projectName,cwd:this.bestCwd(assigned.projectId,session.cwd,assigned.cwd,rootPath)};
+    }
     if (!session.cwd) return session;
-    const normalized = session.cwd.replace(/^\\\\\?\\/, '');
+    const normalized = this.normalizeCwd(session.cwd);
     const sessionPath = resolve(normalized).toLowerCase();
     for (const project of projectRoots) {
       const projectPath = resolve(project.rootPath).toLowerCase();

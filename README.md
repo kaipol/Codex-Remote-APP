@@ -35,7 +35,7 @@ CODEX_SESSIONS_DIR=
 - Vue UI 已拆分为桌面侧栏/移动抽屉、会话列表、时间线、事件/工具卡、Diff viewer、只读审批 sheet、composer、连接 banner、配对与设置界面。
 - create/send/cancel 使用真实 app-server API；assistant delta 按 turn 合并，未知事件安全降级。
 - IndexedDB 保存会话、消息、全局事件 cursor 和 outbox；重连先增量同步，再按会话顺序使用 `client_id` 重放。
-- access/refresh token 使用 IndexedDB 中不可导出的 Web Crypto 密钥加密保存；旧版 `localStorage` token 会自动迁移并删除。
+- access/refresh token 使用 IndexedDB 中不可导出的 Web Crypto 密钥加密保存；旧版 `localStorage` token 会自动迁移并删除。同一浏览器刷新或关闭网页后仍可继续使用；服务端重启会撤销旧设备令牌，需重新配对。
 - WebSocket 使用 Origin 校验、心跳和设备撤销联动；断线重连会先补齐分页事件，再投影实时事件，避免流式回复缺段或重复。
 - 支持 Capacitor Android 工程；移动端可在配对页配置运行时服务端地址。
 - light/dark/system design tokens、safe-area 与移动固定 composer 已落地。

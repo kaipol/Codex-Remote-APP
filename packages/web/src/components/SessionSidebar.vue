@@ -5,11 +5,13 @@ import SessionItem from './SessionItem.vue';
 const p = defineProps<{ sessions: Session[]; activeId?: string; loading: boolean; error: string; busy: boolean; projects: ProjectInfo[]; sidebarOrder: Record<string, string[]>; projectOrder: string[] }>();
 defineEmits<{ select: [session: Session]; refresh: []; pin: [session: Session]; archive: [session: Session]; rename: [session: Session]; create: []; createInCwd: [cwd: string]; settings: [] }>();
 const query = ref(''); const view = ref<'active' | 'archived'>('active'); const collapsed = ref(new Set<string>());
+const visibleLimits = ref<Record<string, number>>({});
 
 interface Group { key: string; label: string; sessions: Session[]; cwd: string; }
 
 const RECENT_KEY = '__recent__';
 const RECENT_LABEL = '最近';
+const SESSION_PAGE_SIZE = 5;
 
 const groups = computed(() => {
   const q = query.value.trim().toLowerCase();
@@ -86,6 +88,17 @@ const groups = computed(() => {
 
 const folder = (path: string) => path;
 function toggle(path: string) { const next = new Set(collapsed.value); next.has(path) ? next.delete(path) : next.add(path); collapsed.value = next; }
+function visibleLimitKey(groupKey: string) { return `${view.value}:${groupKey}`; }
+function visibleLimit(groupKey: string) { return visibleLimits.value[visibleLimitKey(groupKey)] ?? SESSION_PAGE_SIZE; }
+function visibleSessions(group: Group) { return group.sessions.slice(0, visibleLimit(group.key)); }
+function canShowMore(group: Group) { return visibleLimit(group.key) < group.sessions.length; }
+function showMore(group: Group) {
+  const key = visibleLimitKey(group.key);
+  visibleLimits.value = {
+    ...visibleLimits.value,
+    [key]: Math.min(group.sessions.length, visibleLimit(group.key) + SESSION_PAGE_SIZE),
+  };
+}
 </script>
 
 <template>
@@ -95,7 +108,7 @@ function toggle(path: string) { const next = new Set(collapsed.value); next.has(
     <label class="search"><span>⌕</span><input v-model="query" placeholder="搜索会话或目录" aria-label="搜索会话"></label>
     <div class="session-tabs"><button :class="{ active: view === 'active' }" @click="view = 'active'">项目</button><button :class="{ active: view === 'archived' }" @click="view = 'archived'">已归档</button><button class="icon-button" :disabled="loading" title="刷新" @click="$emit('refresh')"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6"/><path d="M2.5 22v-6h6"/><path d="M2 11.5a10 10 0 0 1 18.8-4.3"/><path d="M22 12.5a10 10 0 0 1-18.8 4.2"/></svg></button></div>
     <div v-if="loading && !sessions.length" class="sidebar-state">正在发现 Codex 会话…</div><div v-else-if="error && !sessions.length" class="sidebar-state error">{{ error }}<button @click="$emit('refresh')">重试</button></div><div v-else-if="!groups.length" class="sidebar-state">{{ query ? '没有匹配会话' : view === 'archived' ? '没有已归档会话' : '尚无会话' }}</div>
-    <div v-else class="session-list grouped"><section v-for="group in groups" :key="group.key" class="session-group" :class="{ collapsed: collapsed.has(group.key) }"><div class="project-header-row"><button class="project-header" :title="group.cwd" @click="toggle(group.key)"><svg v-if="collapsed.has(group.key)" class="folder-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v10h-17z"/><path d="M3.5 8.5v-3h6l2 3"/></svg><svg v-else class="folder-svg open" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5v-2h6l2 3h9v2"/><path d="M4.5 10.5h17l-2.4 8H2.6z"/></svg><strong>{{ group.label }}</strong><small class="project-count">{{ group.sessions.length }}</small></button><button class="project-new-thread" :title="`在 ${group.label} 新建会话`" :disabled="busy" @click.stop="$emit('createInCwd', group.cwd)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button></div><div v-show="!collapsed.has(group.key)" class="project-children"><SessionItem v-for="s in group.sessions" :key="s.session_id" :session="s" :selected="s.session_id === activeId" @select="$emit('select', s)" @pin="$emit('pin', s)" @archive="$emit('archive', s)" @rename="$emit('rename', s)"/></div></section></div>
+    <div v-else class="session-list grouped"><section v-for="group in groups" :key="group.key" class="session-group" :class="{ collapsed: collapsed.has(group.key) }"><div class="project-header-row"><button class="project-header" :title="group.cwd" @click="toggle(group.key)"><svg v-if="collapsed.has(group.key)" class="folder-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v10h-17z"/><path d="M3.5 8.5v-3h6l2 3"/></svg><svg v-else class="folder-svg open" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5v-2h6l2 3h9v2"/><path d="M4.5 10.5h17l-2.4 8H2.6z"/></svg><strong>{{ group.label }}</strong><small class="project-count">{{ group.sessions.length }}</small></button><button class="project-new-thread" :title="`在 ${group.label} 新建会话`" :disabled="busy" @click.stop="$emit('createInCwd', group.cwd)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button></div><div v-show="!collapsed.has(group.key)" class="project-children"><SessionItem v-for="s in visibleSessions(group)" :key="s.session_id" :session="s" :selected="s.session_id === activeId" @select="$emit('select', s)" @pin="$emit('pin', s)" @archive="$emit('archive', s)" @rename="$emit('rename', s)"/><button v-if="canShowMore(group)" type="button" class="session-show-more" :aria-label="`展开显示 ${group.label} 的更多会话`" @click="showMore(group)">展开显示</button></div></section></div>
     <footer class="sidebar-footer"><span class="status-dot online"></span><span>Codex</span><small>{{ sessions.length }} 个会话</small></footer>
   </div>
 </template>

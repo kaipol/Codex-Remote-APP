@@ -4,7 +4,16 @@ import type { RpcId, RpcResponse } from './protocol.js';
 
 export class RpcUnavailableError extends Error { status=503 }
 export class RpcTimeoutError extends Error { status=504 }
-export class RpcRemoteError extends Error { constructor(message:string,readonly code?:number,readonly data?:unknown){super(message)} }
+export class RpcRemoteError extends Error {
+  readonly status?: number;
+  constructor(message:string,readonly code?:number,readonly data?:unknown){
+    super(message);
+    this.name='RpcRemoteError';
+    // Codex reports a thread-store writer collision as a remote JSON-RPC
+    // error. Surface it as a conflict instead of a generic 500.
+    if(/already has an active writer|active writer/i.test(message))this.status=409;
+  }
+}
 interface Pending { resolve:(v:unknown)=>void; reject:(e:unknown)=>void; timer:NodeJS.Timeout; abort?:()=>void }
 export class JsonRpcClient extends EventEmitter {
  private next=1;private pending=new Map<RpcId,Pending>();private started=false;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import type { BridgeEvent, Message } from '@remote/shared';
 import MessageBubble from './MessageBubble.vue';
 import ReasoningPanel from './ReasoningPanel.vue';
@@ -13,9 +13,12 @@ const p = defineProps<{
   loading: boolean;
   pendingStates: Record<string, string>;
   activeTurn: boolean;
+  jumpTarget?: { id: string; key: number } | null;
 }>();
 defineEmits<{ openDiff: [diff: string, title: string]; editPending: [message: Message] }>();
 const feed = ref<HTMLElement>();
+const jumpOpen = ref(false);
+const activeUserIndex = ref<number | null>(null);
 
 /** A segment is either a tool-call group, a reasoning panel, an error banner, or a message bubble, in timeline order. */
 type ToolSegment = { kind: 'tools'; group: BridgeEvent[] };
@@ -179,9 +182,31 @@ const timeline = computed<TurnItem[]>(() => {
   return result;
 });
 
+const userTurns = computed(() => timeline.value
+  .filter((item): item is TurnUserItem => item.kind === 'user')
+  .map(item => ({ message: item.message, index: timeline.value.indexOf(item) })));
+
+function userPreview(message: Message) {
+  const text = message.content.trim().replace(/\s+/g, ' ');
+  if (text) return text.length > 90 ? `${text.slice(0, 90)}…` : text;
+  return message.references?.length ? `已添加 ${message.references.length} 个引用` : '空输入';
+}
+
+function isLatestUser(item: TurnItem, index: number) {
+  if (item.kind !== 'user' || !item.message.content.trim()) return false;
+  for (let cursor = timeline.value.length - 1; cursor >= 0; cursor--) {
+    const candidate = timeline.value[cursor];
+    if (candidate.kind !== 'user' || !candidate.message.content.trim()) continue;
+    return cursor === index;
+  }
+  return false;
+}
+
 // Auto-scroll on new timeline items or streaming content updates
 let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+let suppressAutoScrollUntil = 0;
 function autoScroll() {
+  if (Date.now() < suppressAutoScrollUntil) return;
   if (scrollTimer) return;
   scrollTimer = setTimeout(() => {
     scrollTimer = null;
@@ -195,29 +220,66 @@ watch(() => timeline.value.length, autoScroll);
 // Also scroll on streaming content changes — use total content length sum
 // instead of join(',') which can miss updates when two messages have equal length
 watch(() => p.messages.reduce((sum, m) => sum + m.content.length, 0), autoScroll);
+
+function scrollToUserIndex(index: number) {
+  activeUserIndex.value = index;
+  const wrapper = Array.from(feed.value?.querySelectorAll<HTMLElement>('[data-user-index]') ?? []).find(el => Number(el.dataset.userIndex) === index);
+  if (!wrapper) return;
+  suppressAutoScrollUntil = Date.now() + 900;
+  wrapper.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  window.setTimeout(() => { activeUserIndex.value = null; }, 1200);
+}
+
+function scrollToUserMessage(id: string) {
+  const wrapper = Array.from(feed.value?.querySelectorAll<HTMLElement>('[data-user-id]') ?? []).find(el => el.getAttribute('data-user-id') === id);
+  if (!wrapper) return;
+  suppressAutoScrollUntil = Date.now() + 900;
+  wrapper.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+watch(() => p.jumpTarget, target => {
+  if (!target) return;
+  nextTick(() => scrollToUserMessage(target.id));
+});
 </script>
 <template>
-  <div ref="feed" class="conversation">
-    <div v-if="loading" class="timeline-state"><span class="spinner"></span>正在读取会话…</div>
-    <div v-else-if="!timeline.length" class="timeline-state empty">
-      <img class="empty-mark" src="/icon.svg" alt="">
-      <h2>从这里开始</h2>
-      <p>向 Codex 描述你的任务。历史和实时事件会保留在此处。</p>
+  <div class="timeline-shell" :class="{ 'jump-open': jumpOpen }">
+    <div ref="feed" class="conversation">
+      <div v-if="loading" class="timeline-state"><span class="spinner"></span>正在读取会话…</div>
+      <div v-else-if="!timeline.length" class="timeline-state empty">
+        <img class="empty-mark" src="/icon.svg" alt="">
+        <h2>从这里开始</h2>
+        <p>向 Codex 描述你的任务。历史和实时事件会保留在此处。</p>
+      </div>
+      <template v-for="(item, index) in timeline" :key="index">
+        <div v-if="item.kind === 'user'" :data-user-index="index" :data-user-id="item.message.msg_id">
+          <MessageBubble
+            :message="item.message"
+            :state="item.state"
+            :editable="isLatestUser(item, index)"
+            @edit-pending="message => $emit('editPending', message)"
+          />
+        </div>
+        <MessageBubble
+          v-else
+          :messages="item.assistant.messages"
+          :segments="item.assistant.segments"
+          @open-diff="(d, t) => $emit('openDiff', d, t)"
+        />
+      </template>
+      <TypingIndicator :active-turn="p.activeTurn" :events="p.events" />
     </div>
-    <template v-for="(item, index) in timeline" :key="index">
-      <MessageBubble
-        v-if="item.kind === 'user'"
-        :message="item.message"
-        :state="item.state"
-        @edit-pending="message => $emit('editPending', message)"
-      />
-      <MessageBubble
-        v-else
-        :messages="item.assistant.messages"
-        :segments="item.assistant.segments"
-        @open-diff="(d, t) => $emit('openDiff', d, t)"
-      />
-    </template>
-    <TypingIndicator :active-turn="p.activeTurn" :events="p.events" />
+
+    <button v-if="userTurns.length > 1" class="jump-rail-toggle" :class="{ open: jumpOpen }" :title="jumpOpen ? '收起用户输入跳转' : '展开用户输入跳转'" aria-label="用户输入快捷跳转" @click="jumpOpen = !jumpOpen">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16"/><path d="M4 12h10"/><path d="M4 19h16"/><circle cx="18" cy="12" r="2"/></svg>
+    </button>
+    <aside v-if="jumpOpen && userTurns.length > 1" class="user-jump-rail" aria-label="用户输入快捷跳转">
+      <div v-if="userTurns.length" class="user-jump-list">
+        <button v-for="(turn, turnNumber) in userTurns" :key="`jump-${turn.index}`" class="user-jump-item" :class="{ active: activeUserIndex === turn.index }" :title="userPreview(turn.message)" :aria-label="`跳转到第 ${turnNumber + 1} 条用户输入`" @click="scrollToUserIndex(turn.index)">
+          <span class="user-jump-index">{{ turnNumber + 1 }}</span>
+          <span>{{ userPreview(turn.message) }}</span>
+        </button>
+      </div>
+    </aside>
   </div>
 </template>

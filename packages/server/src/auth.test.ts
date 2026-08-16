@@ -23,4 +23,12 @@ describe('refresh token lifetime',()=>{
 	   expect(()=>auth.verify(tokens.access_token)).toThrow(/invalid access token/);
 	   expect(auth.refresh(tokens.device_id,tokens.refresh_token)).toBeUndefined();
 	 });
+	 it('invalidates all existing devices when the service starts again',()=>{
+	   store=new Store(':memory:');
+	   const auth=new AuthService(store,loadConfig({databasePath:':memory:',secret:'x'.repeat(32)}));
+	   const pair=auth.createPairCode();const tokens=auth.pair(pair.code,'test-device')!;
+	   expect(auth.invalidateDevicesOnStartup()).toBe(1);
+	   expect(()=>auth.verify(tokens.access_token)).toThrow(/invalid access token/);
+	   expect(auth.refresh(tokens.device_id,tokens.refresh_token)).toBeUndefined();
+	 });
 });

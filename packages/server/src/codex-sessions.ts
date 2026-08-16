@@ -57,14 +57,103 @@ export class CodexSessionCatalog {
   }
 }
 
+interface RolloutMessageRecord {
+  role: 'user' | 'assistant';
+  content: string;
+  references?: MessageReference[];
+  entryIndex: number;
+  itemId?: string;
+  turnId?: string;
+  source: string;
+}
+
+async function readRolloutEntries(filePath: string): Promise<Entry[]> {
+  const entries: Entry[] = [];
+  for await (const line of lines(filePath)) {
+    const entry = parseEntry(line);
+    if (entry) entries.push(entry);
+  }
+  return entries;
+}
+
+function abortedRolloutRanges(entries: Entry[]): Set<number> {
+  const ranges = new Set<number>();
+  let currentTurnStart = -1;
+  let abortPending = false;
+  for (let i = 0; i < entries.length; i++) {
+    const p = entries[i].payload ?? {};
+    if (entries[i].type === 'event_msg' && p.type === 'task_started') {
+      if (abortPending && currentTurnStart >= 0) {
+        for (let j = currentTurnStart; j < i; j++) ranges.add(j);
+      }
+      currentTurnStart = i;
+      abortPending = false;
+    } else if (entries[i].type === 'event_msg' && (p.type === 'turn_aborted' || p.type === 'thread_rolled_back')) {
+      if (currentTurnStart >= 0) {
+        for (let j = currentTurnStart; j <= i; j++) ranges.add(j);
+        abortPending = true;
+      }
+    }
+  }
+  if (abortPending && currentTurnStart >= 0) {
+    for (let j = currentTurnStart; j < entries.length; j++) ranges.add(j);
+  }
+  return ranges;
+}
+
+function collectRolloutMessages(entries: Entry[]): RolloutMessageRecord[] {
+  const skipped = abortedRolloutRanges(entries);
+  const records: RolloutMessageRecord[] = [];
+  const byKey = new Map<string, number>();
+  let currentTurnId: string | undefined;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const payload = entry.payload ?? {};
+    if (entry.type === 'event_msg' && payload.type === 'task_started') {
+      const startedTurnId = string(payload.turn_id) ?? string(payload.turnId);
+      if (startedTurnId) currentTurnId = startedTurnId;
+    }
+    if (skipped.has(i)) continue;
+    let value = messageFromEntry(entry);
+    if (value && !value.turnId && entry.type === 'event_msg' && (payload.type === 'user_message' || payload.type === 'agent_message' || payload.type === 'assistant_message') && currentTurnId) {
+      value = { ...value, turnId: currentTurnId };
+    }
+    if (!value || (!value.content.trim() && !value.references?.length) || (value.role === 'assistant' && isContextSummary(value.content))) continue;
+    const key = `${value.role}\u0000${value.content}`;
+    const previousIndex = byKey.get(key);
+    const previous = previousIndex === undefined ? undefined : records[previousIndex];
+    const sameItem = Boolean(previous?.itemId && value.itemId && previous.itemId === value.itemId);
+    const sameTurnRepresentation = Boolean(previous?.turnId && value.turnId && previous.turnId === value.turnId && isMessageRepresentationPair(previous.source, entry.type));
+    if (previous && previousIndex !== undefined && (sameItem || sameTurnRepresentation)) {
+      const existingHasUrl = previous.references?.some(ref => ref.url) ?? false;
+      const newHasUrl = value.references?.some(ref => ref.url) ?? false;
+      if (newHasUrl && !existingHasUrl) {
+        records[previousIndex] = { ...previous, references: value.references, entryIndex: i };
+      }
+      byKey.set(key, previousIndex);
+      continue;
+    }
+    byKey.set(key, records.length);
+    records.push({
+      role: value.role,
+      content: value.content,
+      ...(value.references?.length ? { references: value.references } : {}),
+      entryIndex: i,
+      ...(value.itemId ? { itemId: value.itemId } : {}),
+      ...(value.turnId ? { turnId: value.turnId } : {}),
+      source: entry.type ?? '',
+    });
+  }
+  return records;
+}
+
 export async function inspectRollout(filePath: string): Promise<DiscoveredCodexSession | undefined> {
   const fileStat = await stat(filePath);
+  const entries = await readRolloutEntries(filePath);
   let meta: Metadata | undefined;
   let firstUser = '';
   let latest = 0;
-  for await (const line of lines(filePath)) {
-    const entry = parseEntry(line);
-    if (!entry) continue;
+  for (const entry of entries) {
     latest = Math.max(latest, timeValue(entry.timestamp));
     if (!meta && entry.type === 'session_meta') meta = parseMetadata(entry.payload);
     if (!firstUser) {
@@ -73,6 +162,7 @@ export async function inspectRollout(filePath: string): Promise<DiscoveredCodexS
     }
   }
   if (!meta) return undefined;
+  const records = collectRolloutMessages(entries);
   const created = validDate(meta.timestamp) ?? validDateFromMs(fileStat.birthtimeMs || fileStat.ctimeMs);
   const updated = validDateFromMs(latest || fileStat.mtimeMs);
   return {
@@ -84,80 +174,22 @@ export async function inspectRollout(filePath: string): Promise<DiscoveredCodexS
     created_at: created,
     updated_at: updated,
     rollout_path: filePath,
+    message_count: records.length,
+    user_message_count: records.filter(record => record.role === 'user').length,
   };
 }
 
 export async function readRolloutMessages(filePath: string, sessionId: string): Promise<Message[]> {
-  // First pass: collect all entries and identify aborted turn ranges
-  const entries: Entry[] = [];
-  for await (const line of lines(filePath)) {
-    const entry = parseEntry(line);
-    if (entry) entries.push(entry);
-  }
-  // Mark entries belonging to aborted/rolled-back turns.
-  // A turn starts at task_started. If turn_aborted or thread_rolled_back occurs,
-  // the range extends from the turn start through the next task_started (exclusive)
-  // or end of file, to catch trailing token_count/settings events.
-  const abortedTurnRanges = new Set<number>();
-  let currentTurnStart = -1;
-  let abortPending = false;
-  for (let i = 0; i < entries.length; i++) {
-    const p = entries[i].payload ?? {};
-    if (entries[i].type === 'event_msg' && p.type === 'task_started') {
-      if (abortPending && currentTurnStart >= 0) {
-        for (let j = currentTurnStart; j < i; j++) abortedTurnRanges.add(j);
-      }
-      currentTurnStart = i;
-      abortPending = false;
-    } else if (entries[i].type === 'event_msg' && (p.type === 'turn_aborted' || p.type === 'thread_rolled_back')) {
-      if (currentTurnStart >= 0) {
-        for (let j = currentTurnStart; j <= i; j++) abortedTurnRanges.add(j);
-        abortPending = true;
-      }
-    }
-  }
-  if (abortPending && currentTurnStart >= 0) {
-    for (let j = currentTurnStart; j < entries.length; j++) abortedTurnRanges.add(j);
-  }
-  // Second pass: build messages, skipping aborted-turn entries.
-  // Match representations by stable item IDs first, then by a shared turn ID
-  // for the known event_msg/response_item pair. Content and timestamps alone
-  // are deliberately not enough: adjacent turns may repeat the same prompt.
-  const messages: Message[] = [];
-  let seq = 1;
-  const msgByKey = new Map<string, { messageIndex:number; entryIndex:number; source:string; timestamp:number; itemId?:string; turnId?:string }>();
-  for (let i = 0; i < entries.length; i++) {
-    if (abortedTurnRanges.has(i)) continue;
-    const entry = entries[i];
-    const value = messageFromEntry(entry);
-    if (!value || !value.content.trim() && !(value.references?.length) || value.role === 'assistant' && isContextSummary(value.content)) continue;
-    const key = `${value.role}\u0000${value.content}`;
-    const previous = msgByKey.get(key);
-    const timestamp=timeValue(entry.timestamp);
-    const sameItem=Boolean(previous?.itemId&&value.itemId&&previous.itemId===value.itemId);
-    const sameTurnRepresentation=Boolean(previous?.turnId&&value.turnId&&previous.turnId===value.turnId&&isMessageRepresentationPair(previous.source,entry.type));
-    if (previous && (sameItem || sameTurnRepresentation)) {
-      const existing = messages[previous.messageIndex];
-      const existingHasUrl = existing.references?.some(r => r.url) ?? false;
-      const newHasUrl = value.references?.some(r => r.url) ?? false;
-      if (newHasUrl && !existingHasUrl) {
-        messages[previous.messageIndex] = { ...existing, references: value.references, timestamp: validDate(entry.timestamp) ?? existing.timestamp };
-      }
-      msgByKey.set(key,{messageIndex:previous.messageIndex,entryIndex:i,source:entry.type??'',timestamp,itemId:value.itemId,turnId:value.turnId});
-      continue;
-    }
-    msgByKey.set(key, {messageIndex:messages.length,entryIndex:i,source:entry.type??'',timestamp,itemId:value.itemId,turnId:value.turnId});
-    messages.push({
-      msg_id: `${sessionId}:${seq}`,
-      session_id: sessionId,
-      role: value.role,
-      content: value.content,
-      ...(value.references?.length ? { references: value.references } : {}),
-      timestamp: validDate(entry.timestamp) ?? new Date(0).toISOString(),
-      seq: seq++,
-    });
-  }
-  return messages;
+  const entries = await readRolloutEntries(filePath);
+  return collectRolloutMessages(entries).map((record, index) => ({
+    msg_id: `${sessionId}:${index + 1}`,
+    session_id: sessionId,
+    role: record.role,
+    content: record.content,
+    ...(record.references?.length ? { references: record.references } : {}),
+    timestamp: validDate(entries[record.entryIndex]?.timestamp) ?? new Date(0).toISOString(),
+    seq: index + 1,
+  }));
 }
 
 export async function readRolloutEvents(filePath:string,sessionId:string):Promise<BridgeEvent[]>{
@@ -224,7 +256,8 @@ function messageFromEntry(entry: Entry): { role: 'user' | 'assistant'; content: 
   const payload = entry.payload;
   if (!payload) return undefined;
   const itemId=string(payload.id);
-  const turnId=string(payload.turn_id??payload.turnId);
+  const passthrough = payload.internal_chat_message_metadata_passthrough as Record<string, unknown> | undefined;
+  const turnId=string(payload.turn_id ?? payload.turnId ?? passthrough?.turn_id ?? passthrough?.turnId);
   const withIdentity=(message:{role:'user'|'assistant';content:string;references?:MessageReference[]}|undefined)=>message?{...message,...(itemId?{itemId}:{}),...(turnId?{turnId}:{})}:undefined;
   if (entry.type === 'event_msg') {
     if (payload.type === 'user_message') return withIdentity(textMessage('user', payload.message ?? payload.text ?? payload.content));

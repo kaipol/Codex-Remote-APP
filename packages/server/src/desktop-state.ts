@@ -284,10 +284,11 @@ export class DesktopStateReader {
         const assignment = assignments[threadId];
         const dbThread = dbThreadById.get(threadId);
         if (dbThread?.archived) continue;
-        // Skip deleted threads: not in DB AND pendingCoreUpdate === true
-        // (pendingCoreUpdate=true + not in DB = thread was deleted/removed)
-        // (pendingCoreUpdate=false + not in DB = active local session, still show)
-        if (hasDbThreadIndex && !dbThread && assignment?.pendingCoreUpdate === true) continue;
+        // A sidebar-only ID with no backing DB thread is a stale sidebar entry:
+        // it was deleted or never materialized, has no cwd or rollout, and so
+        // cannot be authorized or rendered correctly. When the DB index is
+        // available, drop these instead of surfacing them as "Codex <id>" ghosts.
+        if (hasDbThreadIndex && !dbThread) continue;
         const name = nameIndex.get(threadId);
         const cwd = assignment?.cwd || assignment?.path || project.rootPaths?.[0] || '';
         result.push({

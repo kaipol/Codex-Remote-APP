@@ -13,7 +13,12 @@ const WINDOWS_COMMAND_PRIORITY:Record<string,number>={'.exe':0,'.cmd':1,'.bat':2
 export function selectWindowsCommand(command:string,candidates:string[]):string {
   if(extname(command))return command;
   const matches=candidates.map(value=>value.trim()).filter(Boolean);
-  return matches.sort((left,right)=>(WINDOWS_COMMAND_PRIORITY[extname(left).toLowerCase()]??99)-(WINDOWS_COMMAND_PRIORITY[extname(right).toLowerCase()]??99))[0]??command;
+  // MSIX-packaged executables under WindowsApps cannot be spawned directly
+  // (they return EPERM and must be launched through their App Execution Alias).
+  // Prefer the npm/node shim (.cmd/.bat) or a native binary elsewhere instead.
+  const usable=matches.filter(value=>!/[\\/]WindowsApps[\\/]/i.test(value));
+  const pool=usable.length?usable:matches;
+  return pool.sort((left,right)=>(WINDOWS_COMMAND_PRIORITY[extname(left).toLowerCase()]??99)-(WINDOWS_COMMAND_PRIORITY[extname(right).toLowerCase()]??99))[0]??command;
 }
 
 function resolveWindowsCommand(command:string):string {
@@ -52,5 +57,22 @@ export class AppServerProcess extends EventEmitter {
     child.once('exit',(code,signal)=>{this.child=undefined;this.emit('exit',code,signal)});
   }
   write(value:unknown){if(!this.running)throw new Error('Codex app-server is not running');this.child!.stdin.write(`${JSON.stringify(value)}\n`)}
-  async stop(graceMs=1500){const child=this.child;if(!child)return;child.stdin.end();await Promise.race([new Promise<void>(r=>child.once('exit',()=>r())),new Promise<void>(r=>setTimeout(r,graceMs))]);if(child.exitCode===null)child.kill();}
+  async stop(graceMs=1500){
+    const child=this.child;
+    if(!child)return;
+    const exited=new Promise<void>(resolve=>child.once('exit',()=>resolve()));
+    child.stdin.end();
+    await Promise.race([exited,new Promise<void>(resolve=>setTimeout(resolve,graceMs))]);
+    if(child.exitCode===null){
+      // A .cmd/.bat launch uses cmd.exe as a wrapper. Killing only that
+      // parent can leave the real Codex child alive and holding a thread-store
+      // writer lock across bridge restarts.
+      if(process.platform==='win32'&&child.pid){
+        spawnSync('taskkill',['/PID',String(child.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'});
+      }else{
+        child.kill('SIGKILL');
+      }
+      await Promise.race([exited,new Promise<void>(resolve=>setTimeout(resolve,500))]);
+    }
+  }
 }

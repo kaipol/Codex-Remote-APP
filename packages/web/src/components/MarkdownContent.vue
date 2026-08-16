@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { renderMarkdown } from '../render';
+import { renderMarkdown, renderUserMarkdown } from '../render';
 import { copyText } from '../composables/clipboard';
+import { api } from '../api';
 
-const props = defineProps<{ content: string; streaming?: boolean }>();
+const props = defineProps<{ content: string; streaming?: boolean; user?: boolean }>();
 const root = ref<HTMLElement>();
 const html = ref('');
 
@@ -14,9 +15,10 @@ let lastRenderTime = 0;
 
 async function render() {
   lastRenderTime = Date.now();
-  html.value = renderMarkdown(props.content);
+  html.value = props.user ? renderUserMarkdown(props.content) : renderMarkdown(props.content);
   await nextTick();
   attachCodeCopyButtons();
+  attachLocalPathLinks();
 }
 
 function scheduleRender() {
@@ -45,6 +47,23 @@ function attachCodeCopyButtons() {
       if (await copyText(code)) { button.textContent = '✓'; window.setTimeout(() => { button.textContent = '⧉'; }, 1400); }
     });
     pre.prepend(button);
+  }
+}
+
+function attachLocalPathLinks() {
+  for (const link of root.value?.querySelectorAll('a.local-path-link') || []) {
+    if (link.getAttribute('data-local-path-bound') === 'true') continue;
+    link.setAttribute('data-local-path-bound', 'true');
+    link.addEventListener('click', async event => {
+      event.preventDefault();
+      const path = link.getAttribute('data-local-path');
+      if (!path) return;
+      try {
+        await api.openPath(path);
+      } catch {
+        await copyText(path).catch(() => {});
+      }
+    });
   }
 }
 

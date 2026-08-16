@@ -12,6 +12,8 @@ export interface Session {
   rollout_path?: string;
   project_name?: string;
   project_id?: string;
+  message_count?: number;
+  user_message_count?: number;
 }
 export interface MessageReference { type:'file'|'skill'|'annotation'; label:string; path?:string; detail?:string; url?:string }
 export interface Message { msg_id:string; client_id?:string; turn_id?:string; session_id:string; role:'user'|'assistant'; content:string; references?:MessageReference[]; timestamp:string; seq:number }

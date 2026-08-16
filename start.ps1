@@ -20,15 +20,25 @@ function Get-NpmCommand {
 
 function Get-ListenerProcesses([int]$Port) {
     $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    $seen = @{}
     foreach ($connection in $connections) {
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($connection.OwningProcess)" -ErrorAction SilentlyContinue
-        if ($process) {
-            [PSCustomObject]@{
-                Port = $Port
-                ProcessId = [int]$connection.OwningProcess
-                Name = [string]$process.Name
-                CommandLine = [string]$process.CommandLine
-            }
+        $processId = [int]$connection.OwningProcess
+        if ($seen.ContainsKey($processId)) { continue }
+        $seen[$processId] = $true
+
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
+        $name = if ($process) { [string]$process.Name } else { '<进程不可读>' }
+        $commandLine = if ($process) { [string]$process.CommandLine } else { '' }
+        if (-not $process) {
+            $localProcess = Get-Process -Id $processId -ErrorAction SilentlyContinue
+            if ($localProcess) { $name = [string]$localProcess.ProcessName }
+        }
+
+        [PSCustomObject]@{
+            Port = $Port
+            ProcessId = $processId
+            Name = $name
+            CommandLine = $commandLine
         }
     }
 }
@@ -59,17 +69,47 @@ function Test-OwnedCommand([string]$CommandLine) {
 }
 
 function Assert-PortsAvailable {
-    foreach ($port in @($ServerPort, $WebPort) | Sort-Object -Unique) {
-        foreach ($listener in @(Get-ListenerProcesses -Port $port)) {
-            if (-not $NoRestartOwned -and (Test-OwnedCommand $listener.CommandLine)) {
-                Write-Host "停止本项目残留进程 PID $($listener.ProcessId)（端口 $port）..." -ForegroundColor Yellow
-                Stop-ProcessTree -ProcessId $listener.ProcessId
-                continue
-            }
-            $command = if ($listener.CommandLine) { $listener.CommandLine } else { '<命令行不可读>' }
-            throw "端口 $port 已被其他进程占用（PID $($listener.ProcessId), $($listener.Name)）。未执行强制终止。命令行：$command"
+    $ports = @($ServerPort, $WebPort) | Sort-Object -Unique
+    $listeners = @(
+        foreach ($port in $ports) {
+            Get-ListenerProcesses -Port $port
         }
+    )
+    if ($listeners.Count -eq 0) { return }
+
+    if ($NoRestartOwned) {
+        $details = ($listeners | ForEach-Object {
+            $command = if ($_.CommandLine) { $_.CommandLine } else { '<命令行不可读>' }
+            "端口 $($_.Port)：PID $($_.ProcessId), $($_.Name)，命令行：$command"
+        }) -join [Environment]::NewLine
+        throw "检测到目标端口被占用。已通过 -NoRestartOwned 禁用自动清理：$details"
     }
+
+    $stopped = @{}
+    foreach ($listener in $listeners) {
+        if ($stopped.ContainsKey($listener.ProcessId)) { continue }
+        $stopped[$listener.ProcessId] = $true
+        $owner = if (Test-OwnedCommand $listener.CommandLine) { '本项目' } else { '占用进程' }
+        Write-Host "清理端口 $($listener.Port) 的$owner PID $($listener.ProcessId)（$($listener.Name)）..." -ForegroundColor Yellow
+        Stop-ProcessTree -ProcessId $listener.ProcessId
+    }
+
+    $deadline = (Get-Date).AddSeconds(5)
+    do {
+        $remaining = @(
+            foreach ($port in $ports) {
+                Get-ListenerProcesses -Port $port
+            }
+        )
+        if ($remaining.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $deadline)
+
+    $details = ($remaining | ForEach-Object {
+        $command = if ($_.CommandLine) { $_.CommandLine } else { '<命令行不可读>' }
+        "端口 $($_.Port)：PID $($_.ProcessId), $($_.Name)，命令行：$command"
+    }) -join [Environment]::NewLine
+    throw "清理目标端口后仍被占用：$details"
 }
 
 function Start-NpmScript([string[]]$Arguments, [int]$Port = 0, [string]$ApiUrl = '') {

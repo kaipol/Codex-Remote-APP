@@ -3,6 +3,7 @@ import{describe,expect,it,vi}from'vitest';import{mount}from'@vue/test-utils';imp
 import ComposerBox from'./components/ComposerBox.vue';
 import AppShell from'./components/AppShell.vue';
 import SessionSidebar from'./components/SessionSidebar.vue';
+import SessionItem from'./components/SessionItem.vue';
 import MessageBubble from'./components/MessageBubble.vue';
 import ConversationTimeline from'./components/ConversationTimeline.vue';
 import PairingSurface from'./components/PairingSurface.vue';
@@ -68,20 +69,73 @@ describe('new conversation flow',()=>{
  });
  it('emits createInCwd from a project group hover button',async()=>{
   const wrapper=mount(SessionSidebar,{props:{sessions:[{session_id:'s1',title:'test',status:'active',pinned:false,cwd:'E:\proj',created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z'}],activeId:'s1',loading:false,error:'',busy:false,projects:[],sidebarOrder:{},projectOrder:[]}});
+  expect(wrapper.find('.project-count').text()).toBe('1');
   await wrapper.get('.project-new-thread').trigger('click');
   expect(wrapper.emitted('createInCwd')?.[0]).toEqual(['E:\proj']);
  });
 });
 
-describe('message rendering controls',()=>{
- it('renders markdown math and message copy controls',async()=>{
-  const wrapper=mount(MessageBubble,{props:{message:{msg_id:'m1',session_id:'s',role:'assistant',content:'**结果** $x^2$',timestamp:'2026-01-01T00:00:00Z',seq:1}}});
-  await vi.waitFor(()=>expect(wrapper.find('.katex').exists()).toBe(true),{timeout:2000,interval:20});
-  expect(wrapper.find('button.assistant-copy').exists()).toBe(true);
- });
- it('hides an explicitly interrupted turn',()=>{
-  const wrapper=mount(ConversationTimeline,{props:{messages:[{msg_id:'u1',turn_id:'t1',session_id:'s',role:'user',content:'cancelled prompt',timestamp:'2026-01-01T00:00:00Z',seq:1},{msg_id:'u2',turn_id:'t2',session_id:'s',role:'user',content:'kept prompt',timestamp:'2026-01-01T00:00:02Z',seq:3}],events:[{id:'e1',type:'turn_completed',session:'s',timestamp:'2026-01-01T00:00:01Z',seq:2,metadata:{turn_id:'t1',status:'interrupted'}}],loading:false,pendingStates:{},activeTurn:false}});
-  expect(wrapper.text()).not.toContain('cancelled prompt');
-  expect(wrapper.text()).toContain('kept prompt');
- });
+describe('session item presentation',()=>{
+  it('keeps the sidebar row to the session title and actions',()=>{
+    const wrapper=mount(SessionItem,{props:{session:{session_id:'s1',title:'test',status:'active',pinned:false,cwd:'E:\\proj',created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z',user_message_count:4},selected:false}});
+    expect(wrapper.text()).toContain('test');
+    expect(wrapper.text()).not.toContain('4');
+    expect(wrapper.find('button.session-expand').exists()).toBe(false);
+  });
 });
+
+describe('project session limits',()=>{
+  it('shows five sessions initially and reveals five more per click',async()=>{
+    const sessions=Array.from({length:12},(_,index)=>({
+      session_id:`s${index + 1}`,
+      title:`session ${index + 1}`,
+      status:'active' as const,
+      pinned:false,
+      cwd:'E:\\\\proj',
+      created_at:`2026-01-${String(index + 1).padStart(2,'0')}T00:00:00Z`,
+      updated_at:`2026-01-${String(index + 1).padStart(2,'0')}T00:00:00Z`,
+    }));
+    const wrapper=mount(SessionSidebar,{props:{sessions,loading:false,error:'',busy:false,projects:[],sidebarOrder:{},projectOrder:[]}});
+
+    expect(wrapper.findAll('.session-item-wrap')).toHaveLength(5);
+    expect(wrapper.find('button.session-show-more').exists()).toBe(true);
+
+    await wrapper.get('button.session-show-more').trigger('click');
+    expect(wrapper.findAll('.session-item-wrap')).toHaveLength(10);
+
+    await wrapper.get('button.session-show-more').trigger('click');
+    expect(wrapper.findAll('.session-item-wrap')).toHaveLength(12);
+    expect(wrapper.find('button.session-show-more').exists()).toBe(false);
+  });
+});
+
+describe('message rendering controls',()=>{
+	it('renders markdown math and message copy controls',async()=>{
+	  const wrapper=mount(MessageBubble,{props:{message:{msg_id:'m1',session_id:'s',role:'assistant',content:'**结果** \\(x^2\\)',timestamp:'2026-01-01T00:00:00Z',seq:1}}});
+	  await vi.waitFor(()=>expect(wrapper.find('.katex').exists()).toBe(true),{timeout:2000,interval:20});
+	  expect(wrapper.find('button.assistant-copy').exists()).toBe(true);
+	});
+	it('renders an assistant turn that has only tool segments without crashing',async()=>{
+	  const wrapper=mount(MessageBubble,{props:{messages:[],segments:[{kind:'tools',group:[{id:'e1',type:'tool_call',session:'s',timestamp:'2026-01-01T00:00:00Z',seq:1,metadata:{tool:'shell',arguments:{}}}]}]}});
+	  expect(wrapper.find('.assistant-turn-content').exists()).toBe(true);
+	  expect(wrapper.find('.user-footer').exists()).toBe(false);
+	});
+			it('hides an explicitly interrupted turn',async()=>{
+		  const wrapper=mount(ConversationTimeline,{props:{messages:[{msg_id:'u1',turn_id:'t1',session_id:'s',role:'user',content:'cancelled prompt',timestamp:'2026-01-01T00:00:00Z',seq:1},{msg_id:'u2',turn_id:'t2',session_id:'s',role:'user',content:'kept prompt',timestamp:'2026-01-01T00:00:02Z',seq:3}],events:[{id:'e1',type:'turn_completed',session:'s',timestamp:'2026-01-01T00:00:01Z',seq:2,metadata:{turn_id:'t1',status:'interrupted'}}],loading:false,pendingStates:{},activeTurn:false}});
+		  await wrapper.vm.$nextTick();
+		  expect(wrapper.text()).not.toContain('cancelled prompt');
+	  expect(wrapper.text()).toContain('kept prompt');
+	 });
+		it('keeps an edit affordance on the latest sent user message',()=>{
+		  const wrapper=mount(ConversationTimeline,{props:{messages:[{msg_id:'u1',session_id:'s',role:'user',content:'latest prompt',timestamp:'2026-01-01T00:00:00Z',seq:1}],events:[],loading:false,pendingStates:{},activeTurn:false}});
+		  expect(wrapper.find('button.message-edit').exists()).toBe(true);
+		});
+		it('keeps the user-input navigator compact and opt-in',async()=>{
+		  const wrapper=mount(ConversationTimeline,{props:{messages:[{msg_id:'u1',session_id:'s',role:'user',content:'first prompt',timestamp:'2026-01-01T00:00:00Z',seq:1},{msg_id:'a1',session_id:'s',role:'assistant',content:'reply',timestamp:'2026-01-01T00:00:01Z',seq:2},{msg_id:'u2',session_id:'s',role:'user',content:'second prompt',timestamp:'2026-01-01T00:00:02Z',seq:3}],events:[],loading:false,pendingStates:{},activeTurn:false}});
+		  expect(wrapper.find('.user-jump-rail').exists()).toBe(false);
+		  await wrapper.get('.jump-rail-toggle').trigger('click');
+		  expect(wrapper.find('.user-jump-rail').exists()).toBe(true);
+		  expect(wrapper.findAll('.user-jump-item')).toHaveLength(2);
+		  expect(wrapper.find('.user-jump-index').text()).toBe('1');
+		 });
+		});

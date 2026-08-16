@@ -6,6 +6,7 @@ import MarkdownContent from './MarkdownContent.vue';
 import ToolCallGroup from './ToolCallGroup.vue';
 import ReasoningPanel from './ReasoningPanel.vue';
 import CompactionBanner from './CompactionBanner.vue';
+import { api } from '../api';
 
 type ToolSegment = { kind: 'tools'; group: BridgeEvent[] };
 type ToolClusterSegment = { kind: 'tool-cluster'; groups: BridgeEvent[][] };
@@ -21,6 +22,7 @@ const props = defineProps<{
   messages?: Message[];
   segments?: Segment[];
   state?: string;
+  editable?: boolean;
 }>();
 
 defineEmits<{ openDiff: [diff: string, title: string]; editPending: [message: Message] }>();
@@ -28,10 +30,15 @@ defineEmits<{ openDiff: [diff: string, title: string]; editPending: [message: Me
 const time = (value: string) => new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 
 const renderMessages = computed(() => props.messages ?? (props.message ? [props.message] : []));
-const isAssistant = computed(() => renderMessages.value[0]?.role === 'assistant');
+// Assistant turns can legitimately have zero text messages (only tool calls,
+// reasoning, or a compaction banner). In that case `messages` is an empty array
+// and `renderMessages[0]` is undefined, which previously misclassified the row
+// as a user message and then crashed on `renderMessages[0].content`.
+const isAssistant = computed(() => props.messages !== undefined || renderMessages.value[0]?.role === 'assistant');
 // A message with msg_id starting with 'stream:' is actively being streamed from the backend
 const isStreaming = computed(() => renderMessages.value.some(m => m.msg_id.startsWith('stream:')));
 const combinedContent = computed(() => renderMessages.value.map(m => m.content).filter(Boolean).join('\n\n'));
+const lastTimestamp = computed(() => renderMessages.value.length ? renderMessages.value[renderMessages.value.length - 1].timestamp : '');
 const allReferences = computed(() => renderMessages.value.flatMap(m => m.references ?? []));
 const imageReferences = computed(() => allReferences.value.filter(r => r.type === 'file' && (r as any).url));
 // References shown as chips; exclude all clipboard image refs (rendered as <img> above or no longer needed)
@@ -55,6 +62,14 @@ function openImage(url: string) {
     win.document.body.appendChild(img);
   }
 }
+async function openReference(path: string | undefined) {
+  if (!path) return;
+  try {
+    await api.openPath(path);
+  } catch {
+    // The path is still visible through the title and copyable from the chip.
+  }
+}
 </script>
 
 <template>
@@ -62,10 +77,16 @@ function openImage(url: string) {
     <img v-if="isAssistant" class="avatar avatar-openai" src="/icon.svg" alt="">
     <div class="message-stack">
       <div v-if="chipReferences.length" class="message-references">
-        <span v-for="(reference, i) in chipReferences" :key="i" class="reference-chip" :class="reference.type" :title="reference.path">
-          <i class="reference-icon" aria-hidden="true"><span v-if="reference.type === 'annotation'" class="notebook-icon"></span><template v-else>{{ reference.type === 'file' ? '⌘' : '◇' }}</template></i><b>{{ reference.label }}</b>
-          <span v-if="reference.detail" class="reference-preview"><CopyButton :text="reference.detail" label="复制批注"/><MarkdownContent :content="reference.detail"/></span>
-        </span>
+        <template v-for="(reference, i) in chipReferences" :key="i">
+          <button v-if="reference.type !== 'annotation' && reference.path" class="reference-chip" :class="reference.type" :title="reference.path" type="button" @click="openReference(reference.path)">
+            <i class="reference-icon" aria-hidden="true">{{ reference.type === 'file' ? '⌘' : '◇' }}</i><b>{{ reference.label }}</b>
+            <span v-if="reference.detail" class="reference-preview"><CopyButton :text="reference.detail" label="复制批注"/><MarkdownContent :content="reference.detail"/></span>
+          </button>
+          <span v-else class="reference-chip" :class="reference.type" :title="reference.path">
+            <i class="reference-icon" aria-hidden="true"><span v-if="reference.type === 'annotation'" class="notebook-icon"></span><template v-else>{{ reference.type === 'file' ? '⌘' : '◇' }}</template></i><b>{{ reference.label }}</b>
+            <span v-if="reference.detail" class="reference-preview"><CopyButton :text="reference.detail" label="复制批注"/><MarkdownContent :content="reference.detail"/></span>
+          </span>
+        </template>
       </div>
 
       <template v-if="isAssistant">
@@ -102,7 +123,7 @@ function openImage(url: string) {
 
         <div class="assistant-footer">
           <CopyButton class="assistant-copy" :text="combinedContent" label="复制回复"/>
-          <small class="message-meta">{{ time(renderMessages[renderMessages.length - 1].timestamp) }}<span v-if="state"> · {{ state }}</span></small>
+          <small class="message-meta"><template v-if="lastTimestamp">{{ time(lastTimestamp) }}</template><span v-if="state"> · {{ state }}</span></small>
         </div>
       </template>
 
@@ -111,11 +132,11 @@ function openImage(url: string) {
           <div v-if="imageReferences.length" class="user-images-inline">
             <img v-for="(img, i) in imageReferences" :key="i" :src="(img as any).url" :alt="img.label" class="user-image" @click="(img as any).url && openImage((img as any).url)">
           </div>
-          <div v-if="renderMessages[0]?.content" class="plain-message">{{ renderMessages[0].content }}</div>
+          <MarkdownContent v-if="renderMessages[0]?.content" :content="renderMessages[0].content" :user="true" />
         </div>
         <div class="user-footer">
           <CopyButton class="user-copy" :text="renderMessages[0].content" label="复制回复"/>
-          <button v-if="state && renderMessages[0]?.client_id" class="message-edit" title="编辑待发送消息" aria-label="编辑待发送消息" @click="$emit('editPending', renderMessages[0])">✎</button>
+          <button v-if="renderMessages[0]?.content && (editable || (state && renderMessages[0]?.client_id))" class="message-edit" title="编辑后重新发送" aria-label="编辑后重新发送" @click="$emit('editPending', renderMessages[0])">✎</button>
           <small class="message-meta">{{ time(renderMessages[0].timestamp) }}<span v-if="state"> · {{ state }}</span></small>
         </div>
       </template>

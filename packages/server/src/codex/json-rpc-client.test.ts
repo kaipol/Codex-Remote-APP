@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { describe,expect,it } from 'vitest';
-import { JsonRpcClient,RpcTimeoutError,RpcUnavailableError } from './json-rpc-client.js';
+import { JsonRpcClient,RpcRemoteError,RpcTimeoutError,RpcUnavailableError } from './json-rpc-client.js';
 
 class FakeProcess extends EventEmitter {
   writes:any[]=[];
@@ -25,5 +25,12 @@ describe('JsonRpcClient reliability',()=>{
   it('times out unanswered requests',async()=>{
     const process=new FakeProcess();const rpc=new JsonRpcClient(process as any,10);
     await expect(rpc.request('thread/read')).rejects.toBeInstanceOf(RpcTimeoutError);
+  });
+  it('maps active-writer failures to a conflict response',async()=>{
+    const process=new FakeProcess();const rpc=new JsonRpcClient(process as any,100);
+    const pending=rpc.request('thread/resume');const id=process.writes[0].id;
+    process.emit('line',JSON.stringify({id,error:{code:-32603,message:'thread thread-1 already has an active writer'}}));
+    await expect(pending).rejects.toMatchObject({name:'RpcRemoteError',status:409});
+    await expect(pending).rejects.toBeInstanceOf(RpcRemoteError);
   });
 });

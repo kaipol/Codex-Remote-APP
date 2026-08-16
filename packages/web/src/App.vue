@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {computed,onBeforeUnmount,onMounted,ref} from 'vue';
 import type {AppOption,ApprovalDecision,BridgeEvent,CodexDefaults,Message,ModelOption,PendingApproval,ProjectInfo,RuntimeConfig,Session,SkillOption,UserInput} from '@remote/shared';
-import {ApiError,api,clearAuth,configureServerUrl,connect,currentServerUrl,ensureFreshToken,hasAuth,onAuthLost,onTokenRefreshed,pair} from './api';
+import {ApiError,api,clearAuth,configureServerUrl,connect,currentServerUrl,ensureAuth,ensureFreshToken,hasAuth,onAuthLost,onTokenRefreshed,pair} from './api';
 import {cacheEvents,cacheMessages,cacheSessions,clearLocalState,cursor,db,setCursor,setStreamId,streamId,type Pending} from './db';
 import {deriveActiveTurn,mergeBridgeEvent,projectBridgeEvents} from './composables/eventProjection';
 import {DeferredSendError,replayInSessionOrder} from './composables/outbox';
@@ -18,18 +18,18 @@ import SessionSidebar from './components/SessionSidebar.vue';
 import SettingsSurface from './components/SettingsSurface.vue';
 import ThreadHeader from './components/ThreadHeader.vue';
 
-const paired=ref(false),pairBusy=ref(false),error=ref(''),sessions=ref<Session[]>([]),active=ref<Session|null>(null),messages=ref<Message[]>([]),events=ref<BridgeEvent[]>([]),approvals=ref<PendingApproval[]>([]),approvalBusy=ref(''),online=ref(navigator.onLine),wsState=ref<'connected'|'connecting'|'offline'>('offline'),appServer=ref<'ready'|'error'>('ready'),drawer=ref(false),sidebarHidden=ref(localStorage.getItem('sidebar-hidden')==='true'),creatingThread=ref(false),loadingSessions=ref(false),loadingThread=ref(false),activeTurn=ref(false),sending=ref(false),pending=ref<Pending[]>([]),settingsOpen=ref(false),approvalOpen=ref(false),diffOpen=ref(false),diff=ref(''),diffTitle=ref(''),theme=ref(localStorage.getItem('theme')||'system'),models=ref<ModelOption[]>([]),skills=ref<SkillOption[]>([]),apps=ref<AppOption[]>([]),defaults=ref<CodexDefaults>({}),capabilitiesLoading=ref(false),allowedCwds=ref<string[]>([]),projectList=ref<ProjectInfo[]>([]),sidebarOrder=ref<Record<string,string[]>>({}),projectOrder=ref<string[]>([]);
-const draftCwd=ref(''),newThreadOpen=ref(false),createError=ref(''),initialServer=ref(currentServerUrl()),editingPending=ref<Pending|null>(null),pendingEditorText=ref('');let ws:WebSocket|null=null,retryTimer:number|undefined,keepaliveTimer:number|undefined,sessionRefreshTimer:number|undefined,manualClose=false;
+const paired=ref(false),pairBusy=ref(false),error=ref(''),sessions=ref<Session[]>([]),active=ref<Session|null>(null),messages=ref<Message[]>([]),events=ref<BridgeEvent[]>([]),approvals=ref<PendingApproval[]>([]),approvalBusy=ref(''),online=ref(navigator.onLine),wsState=ref<'connected'|'connecting'|'offline'>('offline'),appServer=ref<'ready'|'error'>('ready'),drawer=ref(false),sidebarHidden=ref(localStorage.getItem('sidebar-hidden')==='true'),creatingThread=ref(false),loadingSessions=ref(false),loadingThread=ref(false),activeTurn=ref(false),sending=ref(false),pending=ref<Pending[]>([]),settingsOpen=ref(false),approvalOpen=ref(false),diffOpen=ref(false),diff=ref(''),diffTitle=ref(''),theme=ref(localStorage.getItem('theme')||'system'),models=ref<ModelOption[]>([]),skills=ref<SkillOption[]>([]),apps=ref<AppOption[]>([]),defaults=ref<CodexDefaults>({}),capabilitiesLoading=ref(false),allowedCwds=ref<string[]>([]),projectList=ref<ProjectInfo[]>([]),sidebarOrder=ref<Record<string,string[]>>({}),projectOrder=ref<string[]>([]),jumpTarget=ref<{id:string;key:number}|null>(null);
+const draftCwd=ref(''),newThreadOpen=ref(false),createError=ref(''),initialServer=ref(currentServerUrl()),editingPending=ref<Pending|null>(null),editingSent=ref<Message|null>(null),pendingEditorText=ref(''),lastRuntime=ref<RuntimeConfig>({});let ws:WebSocket|null=null,retryTimer:number|undefined,keepaliveTimer:number|undefined,sessionRefreshTimer:number|undefined,manualClose=false;
 let retryCount=0;
 let wsGeneration=0;
 let selectionGeneration=0;
-const pendingCount=computed(()=>pending.value.filter(item=>item.status!=='sent').length);
-const pendingStates=computed(()=>Object.fromEntries(pending.value.map(item=>[item.id,item.status==='pending'?'已排队':item.status==='waiting'?'等待当前回复结束':item.status==='sending'?'发送中':item.status==='failed'?`发送失败：${item.error||'可重试'}`:item.status==='quarantined'?`已隔离：${item.error||'请确认后重试'}`:'已接收'])));
-function updateSession(updated:Session){const index=sessions.value.findIndex(item=>item.session_id===updated.session_id);if(index>=0)sessions.value[index]=updated;else sessions.value.unshift(updated);active.value=active.value?.session_id===updated.session_id?updated:active.value;void db.sessions.put(updated)}
+const pendingCount=computed(()=>pending.value.filter(item=>['pending','waiting','sending'].includes(item.status)).length);
+const pendingStates=computed(()=>Object.fromEntries(pending.value.map(item=>[item.id,item.status==='pending'?'已排队':item.status==='waiting'?'等待当前回复结束':item.status==='sending'?'发送中':item.status==='failed'?`发送失败：${item.error||'无法发送'}`:item.status==='quarantined'?`已隔离：${item.error||'需要重新配对或编辑后发送'}`:'已接收'])));
+function updateSession(updated:Session){const index=sessions.value.findIndex(item=>item.session_id===updated.session_id);if(index>=0)sessions.value[index]=updated;else sessions.value.unshift(updated);active.value=active.value?.session_id===updated.session_id?updated:active.value;db.sessions.put(updated).catch(error=>console.warn('[remote:db] session cache write failed',error))}
 function applyTheme(value:string){theme.value=value;localStorage.setItem('theme',value);document.documentElement.dataset.theme=value}
 function toggleSidebar(){sidebarHidden.value=!sidebarHidden.value;localStorage.setItem('sidebar-hidden',String(sidebarHidden.value))}
 async function doPair(code:string,serverUrl:string){pairBusy.value=true;error.value='';try{initialServer.value=configureServerUrl(serverUrl);await pair(code);await clearLocalState();paired.value=true;await boot()}catch(e){error.value=e instanceof Error?e.message:'配对失败'}finally{pairBusy.value=false}}
-async function loadSessions(refresh=false){loadingSessions.value=true;error.value='';try{const list=refresh?await api.refreshSessions():await api.sessions();sessions.value=list;await cacheSessions(list);appServer.value='ready';if(active.value&&active.value.session_id!=='draft'&&!list.some(item=>item.session_id===active.value?.session_id)){selectionGeneration++;active.value=null;messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false}}catch(e){sessions.value=await db.sessions.orderBy('updated_at').reverse().toArray();error.value=e instanceof Error?e.message:'无法读取会话';appServer.value='error'}finally{loadingSessions.value=false}if(!active.value&&sessions.value[0])await select(sessions.value[0])}
+async function loadSessions(refresh=false){loadingSessions.value=true;error.value='';try{const list=refresh?await api.refreshSessions():await api.sessions();sessions.value=list;await cacheSessions(list);appServer.value='ready';if(active.value&&active.value.session_id!=='draft'&&!list.some(item=>item.session_id===active.value?.session_id)){selectionGeneration++;active.value=null;messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false}}catch(e){try{sessions.value=await db.sessions.orderBy('updated_at').reverse().toArray()}catch(cacheError){console.warn('[remote:db] sessions fallback read failed',cacheError);sessions.value=[]}error.value=e instanceof Error?e.message:'无法读取会话';appServer.value='error'}finally{loadingSessions.value=false}if(!active.value&&sessions.value[0])await select(sessions.value[0])}
 function createThread(){startDraft(active.value?.cwd||allowedCwds.value[0]||'')}
 function createInCwd(cwd:string){startDraft(allowedCwds.value.includes(cwd)?cwd:allowedCwds.value[0]||cwd)}
 function openManualCreate(){createError.value='';newThreadOpen.value=true}
@@ -51,16 +51,19 @@ let syncInFlight:Promise<void>|null=null;
 let syncGeneration=0;
 async function resetSyncState(){
   syncResetObserved=true;
-  await db.transaction('rw',db.sessions,db.events,db.messages,db.pending,db.meta,async()=>{
-    await db.sessions.clear();await db.events.clear();await db.messages.clear();
-    // A stream reset means the server event history changed.  Retrying an
-    // in-flight request automatically could create a duplicate turn, so keep
-    // it quarantined until the user explicitly confirms a retry.
-    await db.pending.toCollection().modify(item=>{if(item.status!=='sent'){item.status='quarantined';item.error='服务器同步状态已重置，请确认后重试'}});
-    await db.pending.where('status').equals('sent').delete();
-    await db.meta.clear();
-  });
-  pending.value=await db.pending.toArray();sessions.value=[];selectionGeneration++;active.value=null;approvals.value=[];events.value=[];messages.value=[];activeTurn.value=false;
+  try{
+    await db.transaction('rw',db.sessions,db.events,db.messages,db.pending,db.meta,async()=>{
+      await db.sessions.clear();await db.events.clear();await db.messages.clear();
+      // A stream reset means the server event history changed.  Retrying an
+      // in-flight request automatically could create a duplicate turn, so keep
+      // it quarantined until the user explicitly confirms a retry.
+      await db.pending.toCollection().modify(item=>{if(item.status!=='sent'){item.status='quarantined';item.error='服务器同步状态已重置，请确认后重试'}});
+      await db.pending.where('status').equals('sent').delete();
+      await db.meta.clear();
+    });
+  }catch(error){console.warn('[remote:db] sync reset failed',error)}
+  try{pending.value=await db.pending.toArray()}catch(error){console.warn('[remote:db] pending read after reset failed',error);pending.value=[]}
+  sessions.value=[];selectionGeneration++;active.value=null;approvals.value=[];events.value=[];messages.value=[];activeTurn.value=false;
 }
 async function syncAll(generation=wsGeneration){
   if(syncInFlight&&syncGeneration===generation)return syncInFlight;
@@ -93,13 +96,14 @@ async function acknowledgePending(items:Message[]){
 async function acknowledgeClientIds(ids:string[]){
   const clientIds=[...new Set(ids.filter(Boolean))];
   if(!clientIds.length)return;
-  await Promise.all(clientIds.flatMap(clientId=>[db.pending.delete(clientId),db.messages.delete(`local:${clientId}`)]));
+  try{await Promise.all(clientIds.flatMap(clientId=>[db.pending.delete(clientId),db.messages.delete(`local:${clientId}`)]))}catch(error){console.warn('[remote:db] acknowledge delete failed',error)}
   const acknowledged=new Set(clientIds);
   pending.value=pending.value.filter(item=>!acknowledged.has(item.id));
   messages.value=messages.value.filter(item=>!(item.msg_id.startsWith('local:')&&item.client_id&&acknowledged.has(item.client_id)));
 }
 async function reconcilePending(){
-  const queued=await db.pending.toArray();
+  let queued:Pending[]=[];
+  try{queued=await db.pending.toArray()}catch(error){console.warn('[remote:db] pending reconcile read failed',error)}
   const sessionIds=[...new Set(queued.map(item=>item.session_id).filter(id=>id&&id!=='draft'))];
   await Promise.all(sessionIds.map(async sessionId=>{
     const detail=await api.session(sessionId).catch(()=>undefined);
@@ -107,7 +111,7 @@ async function reconcilePending(){
   }));
 }
 async function project(event:BridgeEvent){
-  await db.events.put(event);
+  try{await db.events.put(event)}catch(error){console.warn('[remote:db] event cache write failed',error)}
   if(event.type==='session_updated')refreshSessionsSoon();
   // The app-server emits the canonical user_message event after it has
   // accepted a turn.  That event is the durable acknowledgement for the
@@ -218,22 +222,55 @@ onTokenRefreshed(()=>{
 });
 
 async function queueMessage(payload:{text:string;input:UserInput[];runtime:RuntimeConfig}){if(!active.value)return;
+  lastRuntime.value=payload.runtime;
   let sessionId=active.value.session_id;let cwd=active.value.cwd;
   if(sessionId==='draft'){creatingThread.value=true;error.value='';try{const created=await api.create(draftCwd.value||cwd||'.');sessionId=created.session_id;updateSession(created);active.value=created;draftCwd.value='';await loadCapabilities()}catch(e){error.value=e instanceof Error?e.message:'创建失败';creatingThread.value=false;return}finally{creatingThread.value=false}}
-  const id=crypto.randomUUID();const item:Pending={id,session_id:sessionId,content:payload.text,input:payload.input,runtime:payload.runtime,created_at:new Date().toISOString(),status:'pending'};console.info('[remote:message] queued',{clientId:id,sessionId,inputCount:payload.input.length});await db.pending.put(item);pending.value.push(item);const refs=payload.input.filter(x=>x.type==='mention'||x.type==='image'||x.type==='skill').map(x=>x.type==='mention'?{type:'file' as const,label:x.name,path:x.path}:x.type==='image'?{type:'file' as const,label:x.name||'图片',url:x.url}:{type:'skill' as const,label:x.name,path:x.path});messages.value.push({msg_id:`local:${id}`,client_id:id,session_id:sessionId,role:'user',content:payload.text,timestamp:item.created_at,seq:Number.MAX_SAFE_INTEGER-pending.value.length,...(refs.length?{references:refs}:{})});await db.messages.put(messages.value.at(-1)!);if(online.value)await replayOutbox()}
-async function replayOutbox(){if(sending.value||!online.value)return;sending.value=true;const items=await db.pending.where('status').anyOf('pending','waiting','failed','sending').toArray();if(!items.length){sending.value=false;return}try{await replayInSessionOrder(items,async item=>{console.info('[remote:message] sending',{clientId:item.id,sessionId:item.session_id});try{const accepted=await api.send(item.session_id,item.input??[{type:'text',text:item.content}],item.id,item.runtime);console.info('[remote:message] accepted',{clientId:item.id,sessionId:item.session_id,turnId:accepted.turn_id});return accepted}catch(error){if(error instanceof ApiError&&error.status===409&&/(?:active turn|already in progress)/i.test(error.message))throw new DeferredSendError();throw error}},async item=>{const index=pending.value.findIndex(x=>x.id===item.id);if(item.status==='sent'){await db.pending.delete(item.id);if(index>=0)pending.value.splice(index,1);return}await db.pending.put(item);if(index>=0)pending.value[index]={...item};else pending.value.push({...item});if(item.status==='failed')console.error('[remote:message] failed',{clientId:item.id,sessionId:item.session_id,error:item.error})})}finally{sending.value=false}}
-async function retryFailed(){for(const item of pending.value.filter(x=>x.status==='failed')){item.status='pending';item.error=undefined;await db.pending.put(item)}await replayOutbox()}
-async function retryQuarantined(){for(const item of pending.value.filter(x=>x.status==='quarantined')){item.status='pending';item.error=undefined;await db.pending.put(item)}await replayOutbox()}
-function openPendingEditor(message:Message){const item=message.client_id?pending.value.find(value=>value.id===message.client_id):undefined;if(!item)return;editingPending.value=item;pendingEditorText.value=item.content}
-async function savePendingEdit(){const item=editingPending.value;const content=pendingEditorText.value.trim();if(!item||!content)return;item.content=content;const textIndex=item.input?.findIndex(input=>input.type==='text')??-1;item.input=textIndex>=0?item.input!.map((input,index)=>index===textIndex?{type:'text' as const,text:content}:input):[{type:'text',text:content},...(item.input??[])];item.status='pending';item.error=undefined;await db.pending.put(item);const index=pending.value.findIndex(value=>value.id===item.id);if(index>=0)pending.value[index]={...item};messages.value=messages.value.map(message=>message.client_id===item.id?{...message,content}:message);await db.messages.put({msg_id:`local:${item.id}`,client_id:item.id,session_id:item.session_id,role:'user',content,timestamp:item.created_at,seq:Number.MAX_SAFE_INTEGER-(index>=0?index:0)});editingPending.value=null;pendingEditorText.value='';await replayOutbox()}
-async function cancelPendingMessage(){const item=editingPending.value;if(!item)return;await Promise.all([db.pending.delete(item.id),db.messages.delete(`local:${item.id}`)]);pending.value=pending.value.filter(value=>value.id!==item.id);messages.value=messages.value.filter(message=>message.client_id!==item.id);editingPending.value=null;pendingEditorText.value=''}
+  const id=crypto.randomUUID();const item:Pending={id,session_id:sessionId,content:payload.text,input:payload.input,runtime:payload.runtime,created_at:new Date().toISOString(),status:'pending'};console.info('[remote:message] queued',{clientId:id,sessionId,inputCount:payload.input.length});try{await db.pending.put(item)}catch(cacheError){console.warn('[remote:message] pending cache write failed',{name:(cacheError as Error)?.name,message:(cacheError as Error)?.message,inner:(cacheError as {inner?:unknown})?.inner})}pending.value.push(item);const refs=payload.input.filter(x=>x.type==='mention'||x.type==='image'||x.type==='skill').map(x=>x.type==='mention'?{type:'file' as const,label:x.name,path:x.path}:x.type==='image'?{type:'file' as const,label:x.name||'图片',url:x.url}:{type:'skill' as const,label:x.name,path:x.path});messages.value.push({msg_id:`local:${id}`,client_id:id,session_id:sessionId,role:'user',content:payload.text,timestamp:item.created_at,seq:Number.MAX_SAFE_INTEGER-pending.value.length,...(refs.length?{references:refs}:{})});try{await db.messages.put(messages.value.at(-1)!)}catch(cacheError){console.warn('[remote:message] message cache write failed',{name:(cacheError as Error)?.name,message:(cacheError as Error)?.message})}if(online.value)await replayOutbox()}
+async function replayOutbox(){if(sending.value||!online.value)return;sending.value=true;let items:Pending[]=[];try{items=await db.pending.where('status').anyOf('pending','waiting','sending').toArray()}catch(cacheError){console.warn('[remote:message] pending cache read failed',{name:(cacheError as Error)?.name,message:(cacheError as Error)?.message})}const seen=new Set(items.map(value=>value.id));for(const value of pending.value){if(!seen.has(value.id)&&['pending','waiting','sending'].includes(value.status))items.push(value)}if(!items.length){sending.value=false;return}try{await replayInSessionOrder(items,async item=>{console.info('[remote:message] sending',{clientId:item.id,sessionId:item.session_id});try{const accepted=await api.send(item.session_id,item.input??[{type:'text',text:item.content}],item.id,item.runtime);console.info('[remote:message] accepted',{clientId:item.id,sessionId:item.session_id,turnId:accepted.turn_id});return accepted}catch(error){if(error instanceof ApiError&&error.status===409&&/(?:active turn|already in progress|active writer)/i.test(error.message))throw new DeferredSendError();throw error}},async item=>{const index=pending.value.findIndex(x=>x.id===item.id);if(item.status==='sent'){try{await db.pending.delete(item.id)}catch(cacheError){console.warn('[remote:message] pending cache delete failed',{name:(cacheError as Error)?.name,message:(cacheError as Error)?.message})}if(index>=0)pending.value.splice(index,1);return}try{await db.pending.put(item)}catch(cacheError){console.warn('[remote:message] pending cache update failed',{name:(cacheError as Error)?.name,message:(cacheError as Error)?.message})}if(index>=0)pending.value[index]={...item};else pending.value.push({...item});if(item.status==='failed')console.error('[remote:message] failed',{clientId:item.id,sessionId:item.session_id,error:item.error})})}finally{sending.value=false}}
+function messageInput(message:Message):UserInput[]{
+  const input:UserInput[]=[];
+  if(message.content.trim())input.push({type:'text',text:message.content});
+  for(const reference of message.references??[]){
+    if(reference.type==='file'&&reference.url?.startsWith('data:image/'))input.push({type:'image',url:reference.url,name:reference.label});
+    else if(reference.type==='file'&&reference.path)input.push({type:'mention',name:reference.label,path:reference.path});
+    else if(reference.type==='skill'&&reference.path)input.push({type:'skill',name:reference.label,path:reference.path});
+  }
+  return input;
+}
+function resendRuntime():RuntimeConfig{
+  const fallback=defaults.value;
+  return {
+    model:lastRuntime.value.model||fallback.model,
+    effort:lastRuntime.value.effort||fallback.effort,
+    approvalPolicy:lastRuntime.value.approvalPolicy||fallback.approvalPolicy,
+    sandbox:lastRuntime.value.sandbox||fallback.sandbox,
+  };
+}
+function openPendingEditor(message:Message){
+  const item=message.client_id?pending.value.find(value=>value.id===message.client_id):undefined;
+  if(item){editingPending.value=item;editingSent.value=null;pendingEditorText.value=item.content;return}
+  editingPending.value=null;editingSent.value=message;pendingEditorText.value=message.content;
+}
+async function savePendingEdit(){const item=editingPending.value;const content=pendingEditorText.value.trim();if(!item||!content)return;item.content=content;const textIndex=item.input?.findIndex(input=>input.type==='text')??-1;item.input=textIndex>=0?item.input!.map((input,index)=>index===textIndex?{type:'text' as const,text:content}:input):[{type:'text',text:content},...(item.input??[])];item.status='pending';item.error=undefined;try{await db.pending.put(item)}catch(error){console.warn('[remote:db] pending edit cache update failed',error)}const index=pending.value.findIndex(value=>value.id===item.id);if(index>=0)pending.value[index]={...item};messages.value=messages.value.map(message=>message.client_id===item.id?{...message,content}:message);try{await db.messages.put({msg_id:`local:${item.id}`,client_id:item.id,session_id:item.session_id,role:'user',content,timestamp:item.created_at,seq:Number.MAX_SAFE_INTEGER-(index>=0?index:0)})}catch(error){console.warn('[remote:db] edited message cache write failed',error)}editingPending.value=null;pendingEditorText.value='';await replayOutbox()}
+async function cancelPendingMessage(){const item=editingPending.value;if(!item)return;try{await Promise.all([db.pending.delete(item.id),db.messages.delete(`local:${item.id}`)])}catch(error){console.warn('[remote:db] pending cancel failed',error)}pending.value=pending.value.filter(value=>value.id!==item.id);messages.value=messages.value.filter(message=>message.client_id!==item.id);editingPending.value=null;pendingEditorText.value=''}
+async function saveSentEdit(){
+  const message=editingSent.value;const content=pendingEditorText.value.trim();
+  if(!message||!content)return;
+  if(active.value?.session_id!==message.session_id){
+    const target=sessions.value.find(session=>session.session_id===message.session_id);
+    if(target)await select(target);else return;
+  }
+  editingSent.value=null;pendingEditorText.value='';
+  await queueMessage({text:content,input:messageInput({...message,content}),runtime:resendRuntime()});
+}
+function cancelSentEdit(){editingSent.value=null;pendingEditorText.value=''}
 async function decideApproval(approval:PendingApproval,decision:ApprovalDecision,answers?:Record<string,string[]>){approvalBusy.value=approval.request_id;error.value='';try{await api.decide(approval.request_id,decision,answers);approvals.value=approvals.value.filter(item=>item.request_id!==approval.request_id)}catch(e){error.value=e instanceof Error?e.message:'审批失败'}finally{approvalBusy.value=''}}
 function openDiff(value:string,title:string){diff.value=value;diffTitle.value=title;diffOpen.value=true}
 function network(){online.value=navigator.onLine;if(online.value){openWs()}else{wsState.value='offline';clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);ws?.close()}}
-async function boot(){await db.pending.where('status').equals('sent').delete();pending.value=await db.pending.toArray();try{allowedCwds.value=await api.cwdRoots()}catch{allowedCwds.value=[]};try{const proj=await api.projects();projectList.value=proj.projects;sidebarOrder.value=proj.sidebarOrder;projectOrder.value=proj.projectOrder}catch{projectList.value=[];sidebarOrder.value={};projectOrder.value=[]};await loadSessions();await loadCapabilities();openWs();void reconcilePending()}
+async function boot(){try{await db.pending.where('status').equals('sent').delete()}catch(error){console.warn('[remote:db] sent pending cleanup failed',error)}try{pending.value=await db.pending.toArray()}catch(error){console.warn('[remote:db] pending read failed',error);pending.value=[]}try{allowedCwds.value=await api.cwdRoots()}catch{allowedCwds.value=[]};try{const proj=await api.projects();projectList.value=proj.projects;sidebarOrder.value=proj.sidebarOrder;projectOrder.value=proj.projectOrder}catch{projectList.value=[];sidebarOrder.value={};projectOrder.value=[]};await loadSessions();await loadCapabilities();openWs();void reconcilePending()}
 async function unpair(){manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);wasConnectedOnce=false;ws?.close();await api.revoke().catch(()=>{});await clearAuth(false);await clearLocalState();paired.value=false;settingsOpen.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[]}
 onAuthLost(()=>{manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);wasConnectedOnce=false;ws?.close();void clearLocalState();paired.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[];error.value='登录已过期，请重新配对'});
-onMounted(async()=>{applyTheme(theme.value);addEventListener('online',network);addEventListener('offline',network);await clearAuth(false);paired.value=false});
+onMounted(async()=>{applyTheme(theme.value);addEventListener('online',network);addEventListener('offline',network);await ensureAuth();if(hasAuth())await ensureFreshToken();paired.value=hasAuth();if(paired.value){await boot()}else{paired.value=false}});
 onBeforeUnmount(()=>{manualClose=true;removeEventListener('online',network);removeEventListener('offline',network);ws?.close();clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer)});
 async function select(session:Session){
   const generation=++selectionGeneration;
@@ -253,7 +290,8 @@ async function select(session:Session){
     }else{messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false}
   }catch{
     if(generation!==selectionGeneration)return;
-    const [cachedMessages,cachedEvents]=await Promise.all([db.messages.where('session_id').equals(session.session_id).sortBy('seq'),db.events.where('session').equals(session.session_id).sortBy('seq')]);
+    let cachedMessages:Message[]=[];let cachedEvents:BridgeEvent[]=[];
+    try{[cachedMessages,cachedEvents]=await Promise.all([db.messages.where('session_id').equals(session.session_id).sortBy('seq'),db.events.where('session').equals(session.session_id).sortBy('seq')])}catch(error){console.warn('[remote:db] cached thread read failed',error)}
     if(generation!==selectionGeneration)return;
     const projected=projectBridgeEvents(cachedMessages,cachedEvents);messages.value=projected.messages;events.value=projected.events;approvals.value=[];activeTurn.value=projected.activeTurn;
   }finally{if(generation===selectionGeneration)loadingThread.value=false}
@@ -268,11 +306,7 @@ async function cancel(){if(!active.value)return;try{await api.cancel(active.valu
   <section class="thread-workspace">
     <ConnectionBanner :online="online" :ws="wsState" :app-server="appServer" :pending="pendingCount"/>
     <ThreadHeader :session="active" :active-turn="activeTurn" @menu="drawer=true" @rename="rename" @review="approvalOpen=true"/>
-    <ConversationTimeline :messages="messages" :events="events" :loading="loadingThread" :pending-states="pendingStates" :active-turn="activeTurn" @open-diff="openDiff" @edit-pending="openPendingEditor"/>
-    <div v-if="pending.some(x=>x.status==='failed'||x.status==='quarantined')" class="retry-actions">
-      <button v-if="pending.some(x=>x.status==='failed')" class="retry-chip" @click="retryFailed">重试发送失败的消息</button>
-      <button v-if="pending.some(x=>x.status==='quarantined')" class="retry-chip warning" @click="retryQuarantined">确认后重试已隔离消息</button>
-    </div>
+    <ConversationTimeline :messages="messages" :events="events" :loading="loadingThread" :pending-states="pendingStates" :active-turn="activeTurn" :jump-target="jumpTarget" @open-diff="openDiff" @edit-pending="openPendingEditor"/>
     <ComposerBox :disabled="!active" :active-turn="activeTurn" :online="online" :queued="pendingCount" :sending="sending" :models="models" :skills="skills" :apps="apps" :defaults="defaults" :capabilities-loading="capabilitiesLoading" :cwd="active?.cwd || ''" @load-capabilities="loadCapabilities" @send="queueMessage" @cancel="cancel"/>
   </section>
   <template #overlay>
@@ -281,6 +315,7 @@ async function cancel(){if(!active.value)return;try{await api.cancel(active.valu
     <SettingsSurface :open="settingsOpen" :theme="theme" @close="settingsOpen=false" @theme="applyTheme" @unpair="unpair"/>
     <NewThreadDialog :open="newThreadOpen" :initial="active?.cwd||''" :busy="creatingThread" :error="createError" @close="newThreadOpen=false" @create="confirmCreate"/>
     <div v-if="editingPending" class="modal-scrim" @click.self="editingPending=null"><form class="pending-editor" @submit.prevent="savePendingEdit"><header><div><strong>编辑待发送消息</strong><small>发送会使用修改后的内容；取消该消息会将其从队列移除。</small></div><button type="button" class="icon-button" aria-label="关闭" @click="editingPending=null">×</button></header><textarea v-model="pendingEditorText" aria-label="待发送消息"></textarea><footer><button type="button" class="text-button danger-text" @click="cancelPendingMessage">取消该消息</button><span></span><button type="button" class="text-button" @click="editingPending=null">取消编辑</button><button class="primary" :disabled="!pendingEditorText.trim()">发送修改</button></footer></form></div>
+    <div v-if="editingSent" class="modal-scrim" @click.self="cancelSentEdit"><form class="pending-editor" @submit.prevent="saveSentEdit"><header><div><strong>编辑已发送消息</strong><small>会作为一条新的消息发送，原对话记录不会被改写。</small></div><button type="button" class="icon-button" aria-label="关闭" @click="cancelSentEdit">×</button></header><textarea v-model="pendingEditorText" aria-label="已发送消息"></textarea><footer><span></span><button type="button" class="text-button" @click="cancelSentEdit">取消编辑</button><button class="primary" :disabled="!pendingEditorText.trim()">发送修改</button></footer></form></div>
   </template>
 </AppShell>
 </template>
