@@ -135,6 +135,20 @@ describe('Codex session discovery',()=>{
       expect(session?.message_count).toBe(2);
     }finally{await rm(sessionsDir,{recursive:true,force:true})}
   });
+  it('keeps user and assistant text from an aborted turn instead of dropping them',async()=>{
+    const sessionsDir=join(tmpdir(),`codex-sessions-${crypto.randomUUID()}`);const path=join(sessionsDir,'rollout-aborted.jsonl');
+    const line=(timestamp:string,type:string,payload:unknown)=>JSON.stringify({timestamp,type,payload})+'\n';
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,
+      line('2026-08-14T00:00:00.000Z','event_msg',{type:'task_started',turn_id:'turn-a'})+
+      line('2026-08-14T00:00:00.500Z','event_msg',{type:'user_message',message:'请帮我处理 a'})+
+      line('2026-08-14T00:00:01.000Z','event_msg',{type:'agent_message',message:'已开始处理 a'})+
+      line('2026-08-14T00:00:02.000Z','event_msg',{type:'turn_aborted',turn_id:'turn-a',reason:'cancelled'}));
+    try{
+      const messages=await readRolloutMessages(path,'thread-1');
+      expect(messages.map(message=>message.content)).toEqual(['请帮我处理 a','已开始处理 a']);
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
   it('keeps custom tool calls and non-empty reasoning while ignoring empty reasoning',async()=>{
     const sessionsDir=join(tmpdir(),`codex-sessions-${crypto.randomUUID()}`);const path=join(sessionsDir,'rollout-events.jsonl');
     const line=(timestamp:string,type:string,payload:unknown)=>JSON.stringify({timestamp,type,payload})+'\n';

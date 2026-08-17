@@ -114,7 +114,11 @@ function collectRolloutMessages(entries: Entry[]): RolloutMessageRecord[] {
       const startedTurnId = string(payload.turn_id) ?? string(payload.turnId);
       if (startedTurnId) currentTurnId = startedTurnId;
     }
-    if (skipped.has(i)) continue;
+    // A turn marked aborted (turn_aborted/thread_rolled_back) was interrupted,
+    // not erased. Keep its user/assistant text messages so the history stays
+    // readable; only skip the non-message entries that belong to the aborted
+    // range.
+    if (skipped.has(i) && !messageFromEntry(entry)) continue;
     let value = messageFromEntry(entry);
     if (value && currentTurnId) {
       value = { ...value, turnId: currentTurnId };
@@ -217,6 +221,17 @@ export async function readRolloutEvents(filePath:string,sessionId:string):Promis
       if (lifecycle) {
         events.push(lifecycle);
         seq += 1;
+      }
+      // thread_rolled_back has no turn_id, but it implicitly fails the
+      // current turn. Emit a turn_failed so deriveActiveTurn can settle.
+      const msgType = string(payload.type);
+      if (msgType === 'thread_rolled_back' && currentTurnId) {
+        const alreadyFailed = events.some(e => (e.type === 'turn_failed' || e.type === 'turn_completed') && e.metadata?.turn_id === currentTurnId);
+        if (!alreadyFailed) {
+          events.push({id:`${sessionId}:event:${seq}`,session:sessionId,timestamp:validDate(entry.timestamp)??new Date(0).toISOString(),seq,type:'turn_failed',metadata:{turn_id:currentTurnId,status:'rolled_back'}});
+          seq += 1;
+        }
+        currentTurnId = undefined;
       }
       continue;
     }

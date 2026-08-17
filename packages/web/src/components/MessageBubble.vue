@@ -121,7 +121,7 @@ async function openReference(path: string | undefined) {
           </template>
         </div>
 
-        <div class="assistant-footer">
+        <div v-if="combinedContent" class="assistant-footer">
           <CopyButton class="assistant-copy" :text="combinedContent" label="复制回复"/>
           <small class="message-meta"><template v-if="lastTimestamp">{{ time(lastTimestamp) }}</template><span v-if="state"> · {{ state }}</span></small>
         </div>

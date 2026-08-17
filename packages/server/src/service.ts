@@ -1,4 +1,4 @@
-import type { AppOption, FileSearchResult, RuntimeConfig, Session, SessionDetail, SessionStatus, SkillOption, UserInput } from '@remote/shared';
+import type { AppOption, BridgeEvent, FileSearchResult, RuntimeConfig, Session, SessionDetail, SessionStatus, SkillOption, UserInput } from '@remote/shared';
 import { spawn } from 'node:child_process';
 import { readFile, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -184,7 +184,7 @@ export class SessionService {
         return {
           ...session,
           messages: mergeHistoryMessages(rollout.messages, threadMessages),
-          events: mergeEvents([...rollout.events, ...threadEvents], this.store.eventsForSession(id)),
+          events: withCompletedTurnEvents(thread, mergeEvents([...rollout.events, ...threadEvents], this.store.eventsForSession(id))),
         };
       }
       if (thread) {
@@ -193,7 +193,7 @@ export class SessionService {
         if (cwd) session.cwd = cwd;
         const messages = threadHistoryMessages(id, thread, session.updated_at);
         const historyEvents = (thread.turns ?? []).flatMap((turn, turnIndex) => (turn.items ?? []).flatMap((item, itemIndex) => eventFromItem(id, turn.id, item, session.updated_at, turnIndex * 1000 + itemIndex + 1)));
-        return { ...session, messages, events: mergeEvents(historyEvents, this.store.eventsForSession(id)) };
+        return { ...session, messages, events: withCompletedTurnEvents(thread, mergeEvents(historyEvents, this.store.eventsForSession(id))) };
       }
       return undefined;
   }
@@ -289,3 +289,24 @@ function messageHistoryKey(message:any){return `${message.msg_id}\u0000${message
 function eventFromItem(session:string,turn:string,item:any,timestamp:string,seq:number):any[]{const metadata={turn_id:turn,item_id:item.id,item_type:item.type,status:item.status};if(item.type==='commandExecution')return [{id:`history:${item.id}`,type:'command_execution',session,timestamp,seq,content:item.aggregatedOutput||'',metadata:{...metadata,command:item.command,cwd:item.cwd,exit_code:item.exitCode}}];if(item.type==='fileChange')return [{id:`history:${item.id}`,type:'file_change',session,timestamp,seq,metadata:{...metadata,changes:item.changes}}];if(item.type==='reasoning'||item.type==='plan'){const content=text(item.summary??item.text??item.content);return content.trim()?[{id:`history:${item.id}`,type:'reasoning_status',session,timestamp,seq,content,metadata}]:[]}if(item.type==='contextCompaction')return [{id:`history:${item.id}`,type:'context_compaction',session,timestamp,seq,metadata}];if(item.type==='mcpToolCall'||item.type==='collabAgentToolCall')return [{id:`history:${item.id}`,type:'tool_call',session,timestamp,seq,content:text(item.result??item.error),metadata:{...metadata,server:item.server,tool:item.tool,arguments:item.arguments}}];if(item.type==='webSearch')return [{id:`history:${item.id}`,type:'web_search',session,timestamp,seq,content:String(item.query??''),metadata}];return []}
 function mergeEvents(a:any[],b:any[]){const map=new Map<string,any>();for(const event of a)map.set(`${event.type}:${event.metadata?.item_id??event.id}:${event.metadata?.phase??''}`,event);for(const event of b){const key=`${event.type}:${event.metadata?.item_id??event.id}:${event.metadata?.phase??''}`;const existing=map.get(key);if(existing)map.set(key,{...event,seq:existing.seq,timestamp:existing.timestamp});else map.set(key,event)}return [...map.values()]}
 function isContextSummary(textValue:string){return /^\s*#{1,3}\s*(?:Handoff Summary|Context (?:Summary|Compaction))\b/i.test(textValue)||/Another language model started to solve this problem/i.test(textValue)}
+function withCompletedTurnEvents(thread:CodexThread|undefined, events:BridgeEvent[]):BridgeEvent[]{
+  if(!thread?.turns?.length)return events;
+  const finishedTurns=new Map<string,'completed'|'failed'>();
+  for(const turn of thread.turns){
+    const status=String(turn.status||'').toLowerCase();
+    if(isFinishedTurnStatus(status))finishedTurns.set(turn.id,status==='failed'||status==='error'?'failed':'completed');
+  }
+  if(!finishedTurns.size)return events;
+  const terminated=new Set<string>();
+  for(const event of events){
+    if((event.type==='turn_completed'||event.type==='turn_failed')&&typeof event.metadata?.turn_id==='string')terminated.add(event.metadata.turn_id);
+  }
+  const maxSeq=events.reduce((value,event)=>Math.max(value,Number(event.seq)||0),0);
+  const additions:BridgeEvent[]=[];
+  for(const [turnId,status] of finishedTurns){
+    if(terminated.has(turnId))continue;
+    additions.push({id:`history:${turnId}:${status}:${maxSeq+additions.length+1}`,type:status==='failed'?'turn_failed':'turn_completed',session:events[0]?.session||thread.id,timestamp:new Date().toISOString(),seq:maxSeq+additions.length+1,metadata:{turn_id:turnId,status,source:'thread-status-reconciliation'}});
+  }
+  return [...events,...additions];
+}
+function isFinishedTurnStatus(status:string){return status==='completed'||status==='succeeded'||status==='done'||status==='failed'||status==='error'||status==='cancelled'||status==='canceled'||status==='aborted'||status==='interrupted'}

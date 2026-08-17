@@ -142,6 +142,7 @@ describe('message rendering controls',()=>{
 		  const wrapper=mount(MessageBubble,{props:{messages:[],segments:[{kind:'tools',group:[{id:'e1',type:'tool_call',session:'s',timestamp:'2026-01-01T00:00:00Z',seq:1,metadata:{tool:'shell',arguments:{}}}]}]}});
 		  expect(wrapper.find('.assistant-turn-content').exists()).toBe(true);
 		  expect(wrapper.find('.user-footer').exists()).toBe(false);
+		  expect(wrapper.find('.assistant-copy').exists()).toBe(false);
 		});
 		it('renders skill references as icon labels',()=>{
 		  const wrapper=mount(MessageBubble,{props:{message:{msg_id:'u1',session_id:'s',role:'user',content:'请使用这个技能',references:[{type:'skill',label:'Ai Slop Cleaner',path:'C:\\skills\\ai-slop-cleaner\\SKILL.md'}],timestamp:'2026-01-01T00:00:00Z',seq:1}}});

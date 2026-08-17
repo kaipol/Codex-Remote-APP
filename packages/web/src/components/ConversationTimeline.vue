@@ -97,7 +97,7 @@ const timeline = computed<TurnItem[]>(() => {
   const hiddenTurns = new Set(
     p.events
       .filter(e => e.type === 'turn_completed' || e.type === 'turn_failed')
-      .filter(e => ['interrupted', 'cancelled', 'canceled', 'aborted'].includes(String(e.metadata?.status || '').toLowerCase()))
+      .filter(e => ['interrupted', 'cancelled', 'canceled', 'aborted', 'rolled_back'].includes(String(e.metadata?.status || '').toLowerCase()))
       .map(e => String(e.metadata?.turn_id || ''))
       .filter(Boolean)
   );
