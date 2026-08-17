@@ -730,6 +730,54 @@ body,
   min-width: 0;
   max-width: 100%;
 }
+.assistant-turn-content .message-bubble.assistant > .markdown {
+  font-size: 15px;
+  line-height: 1.62;
+}
+.assistant-turn-content .message-bubble.assistant > .markdown h1 {
+  font-size: 1.55em;
+  line-height: 1.35;
+}
+.assistant-turn-content .message-bubble.assistant > .markdown h2 {
+  font-size: 1.4em;
+  line-height: 1.4;
+}
+.assistant-turn-content .message-bubble.assistant > .markdown h3 {
+  font-size: 1.22em;
+  line-height: 1.45;
+}
+.assistant-turn-content .message-bubble.assistant > .markdown h4,
+.assistant-turn-content .message-bubble.assistant > .markdown h5,
+.assistant-turn-content .message-bubble.assistant > .markdown h6 {
+  font-size: 1.08em;
+  line-height: 1.5;
+}
+.message-bubble.user > .markdown {
+  font-size: 15px;
+  line-height: 1.55;
+  white-space: normal;
+}
+.message-bubble.user > .markdown p {
+  margin: 0 0 6px;
+}
+.message-bubble.user > .markdown ol,
+.message-bubble.user > .markdown ul {
+  margin: 4px 0 6px;
+  padding-left: 1.55em;
+}
+.message-bubble.user > .markdown li {
+  margin: 2px 0;
+}
+.message-bubble.user > .markdown li > p {
+  margin: 0;
+}
+.message-bubble.user > .markdown pre,
+.message-bubble.user > .markdown code {
+  white-space: pre-wrap;
+}
+.composer-enhanced textarea {
+  font-size: 17px !important;
+}
 .markdown pre,
 .markdown table,
 .markdown blockquote {
@@ -840,17 +888,24 @@ body,
 .session-item-row {
   position: relative;
   display: flex;
+  width: 100%;
   align-items: center;
 }
 .session-item-row .session-item {
   flex: 1;
+  width: 100%;
   min-width: 0;
-  padding-right: 74px;
+  padding-right: 42px;
 }
 .session-item-row .session-copy {
+  width: 100%;
   min-width: 0;
 }
+.session-item-row .session-copy strong { display: block; width: 100%; }
 @media (max-width: 700px) {
+  .assistant-turn-content .message-bubble.assistant > .markdown { font-size: 14px; }
+  .message-bubble.user > .markdown { font-size: 14px; }
+  .composer-enhanced textarea { font-size: 16px !important; }
   .timeline-shell.jump-open .jump-rail-toggle,
   .jump-rail-toggle {
     right: 14px;
@@ -874,7 +929,161 @@ body,
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+.user-jump-preview {
+  position: fixed;
+  z-index: 240;
+  width: min(420px, calc(100vw - 24px));
+  max-height: 210px;
+  overflow: hidden;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  color: var(--text);
+  box-shadow: 0 14px 40px #0003;
+  pointer-events: none;
+  backdrop-filter: blur(18px);
+}
+.user-jump-preview strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.user-jump-preview p {
+  display: -webkit-box;
+  margin: 7px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+}
+.reference-chip.skill {
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--blue);
+}
+.reference-chip.skill:hover { background: transparent; color: var(--blue); }
+.reference-chip.skill .reference-icon { display: grid; width: 19px; height: 19px; flex: none; place-items: center; }
+.reference-chip.skill .reference-icon svg { display: block; }
+.reference-chip.skill b { color: var(--blue); font-size: 14px; font-weight: 520; }
+.markdown .resource-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  color: var(--blue);
+  font-weight: 520;
+  text-decoration: none;
+  vertical-align: text-bottom;
+}
+.markdown a.resource-link.local-path-link { color: var(--blue); text-decoration: none; }
+.markdown .resource-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.resource-mark-icon { display: block; width: 17px; height: 17px; flex: none; }
 .reference-chip:is(button) {
   font: inherit;
   text-align: left;
+}
+
+/* Center the review modal instead of presenting it as a bottom sheet. */
+.approval-backdrop {
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 20px !important;
+}
+.approval-sheet {
+  width: min(620px, calc(100vw - 40px)) !important;
+  max-height: min(78dvh, 720px) !important;
+  margin: auto !important;
+  border-radius: 18px !important;
+  padding-bottom: 18px !important;
+}
+
+/* Keep the conversation readable while reclaiming the oversized side gutters. */
+.conversation {
+  padding-inline: max(14px, calc((100% - 1040px) / 2)) !important;
+}
+.composer-wrap {
+  padding-inline: max(14px, calc((100% - 1040px) / 2)) !important;
+}
+.message-row.assistant .message-stack {
+  max-width: min(100%, 1040px) !important;
+}
+
+/* Pasted image attachments should be visible before sending, like user images. */
+.composer-chips {
+  align-items: flex-start;
+  padding: 10px 16px 4px !important;
+}
+.composer-attachment {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 28px 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.composer-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-attachment > button {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+}
+.composer-attachment > button:hover {
+  background: var(--surface-strong);
+  color: var(--text);
+}
+.composer-image-attachment {
+  width: 156px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 5px 5px 5px;
+}
+.composer-image-preview {
+  display: block;
+  width: 146px;
+  height: 96px;
+  border-radius: 7px;
+  background: var(--surface-strong);
+  cursor: zoom-in;
+  object-fit: cover;
+}
+.composer-image-attachment .composer-attachment-name {
+  padding: 0 22px 0 2px;
+}
+
+@media (max-width: 700px) {
+  .approval-backdrop { padding: 12px !important; }
+  .approval-sheet { width: min(620px, calc(100vw - 24px)) !important; }
+  .conversation { padding-inline: 12px !important; }
+  .composer-wrap { padding-inline: 12px !important; }
+  .composer-chips { padding-inline: 11px !important; }
 }

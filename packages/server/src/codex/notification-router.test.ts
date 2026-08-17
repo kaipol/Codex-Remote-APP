@@ -20,4 +20,9 @@ describe('notification routing', () => {
 	    expect(event).toMatchObject({type:'assistant_message',content:'done',metadata:{phase:'completed'}});
 	    expect(event).not.toHaveProperty('raw');
 	  });
+
+	  it('keeps structured reasoning summary text in live events',()=>{
+	    const event=routeNotification('item/completed',{threadId:'thread-1',turnId:'turn-1',item:{id:'reasoning-1',type:'reasoning',summary:[{type:'summary_text',text:'检查历史内容'}]}});
+	    expect(event).toMatchObject({type:'reasoning_status',content:'检查历史内容'});
+	  });
 });

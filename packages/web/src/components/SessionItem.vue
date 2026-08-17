@@ -15,7 +15,7 @@ const menu = ref(false);
 <template>
   <div class="session-item-wrap">
     <div class="session-item-row">
-      <button class="session-item" :class="{ selected }" @click="$emit('select')">
+      <button class="session-item" :class="{ selected }" :title="session.title" @click="$emit('select')">
         <span class="session-copy">
           <strong>{{ session.title }}</strong>
         </span>

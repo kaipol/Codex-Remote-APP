@@ -19,7 +19,7 @@ import SettingsSurface from './components/SettingsSurface.vue';
 import ThreadHeader from './components/ThreadHeader.vue';
 
 const paired=ref(false),pairBusy=ref(false),error=ref(''),sessions=ref<Session[]>([]),active=ref<Session|null>(null),messages=ref<Message[]>([]),events=ref<BridgeEvent[]>([]),approvals=ref<PendingApproval[]>([]),approvalBusy=ref(''),online=ref(navigator.onLine),wsState=ref<'connected'|'connecting'|'offline'>('offline'),appServer=ref<'ready'|'error'>('ready'),drawer=ref(false),sidebarHidden=ref(localStorage.getItem('sidebar-hidden')==='true'),creatingThread=ref(false),loadingSessions=ref(false),loadingThread=ref(false),activeTurn=ref(false),sending=ref(false),pending=ref<Pending[]>([]),settingsOpen=ref(false),approvalOpen=ref(false),diffOpen=ref(false),diff=ref(''),diffTitle=ref(''),theme=ref(localStorage.getItem('theme')||'system'),models=ref<ModelOption[]>([]),skills=ref<SkillOption[]>([]),apps=ref<AppOption[]>([]),defaults=ref<CodexDefaults>({}),capabilitiesLoading=ref(false),allowedCwds=ref<string[]>([]),projectList=ref<ProjectInfo[]>([]),sidebarOrder=ref<Record<string,string[]>>({}),projectOrder=ref<string[]>([]),jumpTarget=ref<{id:string;key:number}|null>(null);
-const draftCwd=ref(''),newThreadOpen=ref(false),createError=ref(''),initialServer=ref(currentServerUrl()),editingPending=ref<Pending|null>(null),editingSent=ref<Message|null>(null),pendingEditorText=ref(''),lastRuntime=ref<RuntimeConfig>({});let ws:WebSocket|null=null,retryTimer:number|undefined,keepaliveTimer:number|undefined,sessionRefreshTimer:number|undefined,manualClose=false;
+const draftCwd=ref(''),newThreadOpen=ref(false),createError=ref(''),initialServer=ref(currentServerUrl()),editingPending=ref<Pending|null>(null),editingSent=ref<Message|null>(null),pendingEditorText=ref(''),lastRuntime=ref<RuntimeConfig>({});let ws:WebSocket|null=null,retryTimer:number|undefined,keepaliveTimer:number|undefined,sessionRefreshTimer:number|undefined,capabilityRefreshTimer:number|undefined,manualClose=false,capabilityReloadQueued=false;
 let retryCount=0;
 let wsGeneration=0;
 let selectionGeneration=0;
@@ -39,13 +39,32 @@ function startDraft(cwd:string){
   const effectiveCwd=allowedCwds.value.includes(cwd)?cwd:allowedCwds.value[0]||cwd||'.';
   draftCwd.value=effectiveCwd;
   active.value={session_id:'draft',title:'新会话',status:'active',pinned:false,cwd:effectiveCwd,created_at:new Date().toISOString(),updated_at:new Date().toISOString()};
-  messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false;drawer.value=false;loadingThread.value=false;
+  messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false;drawer.value=false;loadingThread.value=false;void loadCapabilities();
 }
 async function rename(){if(!active.value)return;const title=prompt('会话名称',active.value.title)?.trim();if(title)updateSession(await api.update(active.value.session_id,{title}))}
 async function pin(session:Session){try{updateSession(await api.update(session.session_id,{pinned:!session.pinned}));sessions.value.sort((a,b)=>Number(b.pinned)-Number(a.pinned)||b.updated_at.localeCompare(a.updated_at))}catch(e){error.value=e instanceof Error?e.message:'置顶失败'}}
 async function archive(session:Session){try{const status=session.status==='archived'?'active':'archived';updateSession(await api.update(session.session_id,{status}));if(active.value?.session_id===session.session_id&&status==='archived')active.value=null}catch(e){error.value=e instanceof Error?e.message:'归档失败'}}
 async function renameSession(session:Session){active.value=session;await rename()}
-async function loadCapabilities(){if(!active.value||capabilitiesLoading.value)return;capabilitiesLoading.value=true;const requests=[api.models().then(value=>{models.value=value}),api.skills(active.value.cwd).then(value=>{skills.value=value}),api.apps(active.value.session_id).then(value=>{apps.value=value}),api.defaults().then(value=>{defaults.value=value})];const results=await Promise.allSettled(requests);const failed=results.find(x=>x.status==='rejected');if(failed&&results[3].status==='rejected')error.value=failed.reason instanceof Error?failed.reason.message:'无法读取 Codex 能力';capabilitiesLoading.value=false}
+async function loadCapabilities(){
+  if(!active.value)return;
+  if(capabilitiesLoading.value){capabilityReloadQueued=true;return}
+  capabilitiesLoading.value=true;
+  try{
+    do{
+      capabilityReloadQueued=false;
+      const target=active.value;if(!target)break;
+      const requests=[
+        api.models().then(value=>{models.value=value}),
+        api.skills(target.cwd).then(value=>{if(active.value?.session_id===target.session_id)skills.value=value}),
+        api.apps(target.session_id==='draft'?undefined:target.session_id).then(value=>{if(active.value?.session_id===target.session_id)apps.value=value}),
+        api.defaults().then(value=>{defaults.value=value}),
+      ];
+      const results=await Promise.allSettled(requests);
+      const failed=results.find(result=>result.status==='rejected');
+      if(failed&&results[3].status==='rejected')error.value=failed.reason instanceof Error?failed.reason.message:'无法读取 Codex 能力';
+    }while(capabilityReloadQueued&&active.value)
+  }finally{capabilitiesLoading.value=false}
+}
 let syncResetObserved=false;
 let syncInFlight:Promise<void>|null=null;
 let syncGeneration=0;
@@ -172,10 +191,10 @@ async function openWs(){
   const previous=ws;ws=null;previous?.close();
   showConnecting();
    const buffered:BridgeEvent[]=[];let synchronized=false;
-   const socket=connect(message=>{if(generation===wsGeneration&&message.type==='event'&&message.event){if(synchronized)void enqueueProject(message.event,generation);else buffered.push(message.event)}});
+   const socket=connect(message=>{if(generation!==wsGeneration)return;if(message.type==='capabilities'){void loadCapabilities();return}if(message.type==='event'&&message.event){if(synchronized)void enqueueProject(message.event,generation);else buffered.push(message.event)}});
   ws=socket;
   if(!socket){wsReconnecting=false;return}
-   socket.onopen=async()=>{if(generation!==wsGeneration)return;console.info('[remote:ws] connected');clearTimeout(wsGraceTimer);wsState.value='connected';wasConnectedOnce=true;try{await syncAll(generation);if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;while(buffered.length){if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;const batch=buffered.splice(0).sort((a,b)=>a.seq-b.seq||a.timestamp.localeCompare(b.timestamp));for(const event of batch){if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;await enqueueProject(event,generation)}}if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;synchronized=true;appServer.value='ready';wsReconnecting=false;retryCount=0}catch(error){console.warn('[remote:sync] failed',error);appServer.value='error';socket.close()}};
+   socket.onopen=async()=>{if(generation!==wsGeneration)return;console.info('[remote:ws] connected');clearTimeout(wsGraceTimer);wsState.value='connected';wasConnectedOnce=true;try{await syncAll(generation);if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;while(buffered.length){if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;const batch=buffered.splice(0).sort((a,b)=>a.seq-b.seq||a.timestamp.localeCompare(b.timestamp));for(const event of batch){if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;await enqueueProject(event,generation)}}if(generation!==wsGeneration||socket.readyState!==WebSocket.OPEN)return;synchronized=true;appServer.value='ready';wsReconnecting=false;retryCount=0;void loadCapabilities()}catch(error){console.warn('[remote:sync] failed',error);appServer.value='error';socket.close()}};
   socket.onclose=()=>{
     if(generation!==wsGeneration)return;
     console.warn('[remote:ws] disconnected',{retryCount:retryCount+1});
@@ -266,16 +285,17 @@ async function saveSentEdit(){
 function cancelSentEdit(){editingSent.value=null;pendingEditorText.value=''}
 async function decideApproval(approval:PendingApproval,decision:ApprovalDecision,answers?:Record<string,string[]>){approvalBusy.value=approval.request_id;error.value='';try{await api.decide(approval.request_id,decision,answers);approvals.value=approvals.value.filter(item=>item.request_id!==approval.request_id)}catch(e){error.value=e instanceof Error?e.message:'审批失败'}finally{approvalBusy.value=''}}
 function openDiff(value:string,title:string){diff.value=value;diffTitle.value=title;diffOpen.value=true}
-function network(){online.value=navigator.onLine;if(online.value){openWs()}else{wsState.value='offline';clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);ws?.close()}}
-async function boot(){try{await db.pending.where('status').equals('sent').delete()}catch(error){console.warn('[remote:db] sent pending cleanup failed',error)}try{pending.value=await db.pending.toArray()}catch(error){console.warn('[remote:db] pending read failed',error);pending.value=[]}try{allowedCwds.value=await api.cwdRoots()}catch{allowedCwds.value=[]};try{const proj=await api.projects();projectList.value=proj.projects;sidebarOrder.value=proj.sidebarOrder;projectOrder.value=proj.projectOrder}catch{projectList.value=[];sidebarOrder.value={};projectOrder.value=[]};await loadSessions();await loadCapabilities();openWs();void reconcilePending()}
-async function unpair(){manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);wasConnectedOnce=false;ws?.close();await api.revoke().catch(()=>{});await clearAuth(false);await clearLocalState();paired.value=false;settingsOpen.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[]}
-onAuthLost(()=>{manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);wasConnectedOnce=false;ws?.close();void clearLocalState();paired.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[];error.value='登录已过期，请重新配对'});
-onMounted(async()=>{applyTheme(theme.value);addEventListener('online',network);addEventListener('offline',network);await ensureAuth();if(hasAuth())await ensureFreshToken();paired.value=hasAuth();if(paired.value){await boot()}else{paired.value=false}});
-onBeforeUnmount(()=>{manualClose=true;removeEventListener('online',network);removeEventListener('offline',network);ws?.close();clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer)});
+function refreshCapabilitiesOnFocus(){if(paired.value&&online.value&&document.visibilityState==='visible')void loadCapabilities()}
+function network(){online.value=navigator.onLine;if(online.value){openWs();void loadCapabilities()}else{wsState.value='offline';clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);ws?.close()}}
+async function boot(){try{await db.pending.where('status').equals('sent').delete()}catch(error){console.warn('[remote:db] sent pending cleanup failed',error)}try{pending.value=await db.pending.toArray()}catch(error){console.warn('[remote:db] pending read failed',error);pending.value=[]}try{allowedCwds.value=await api.cwdRoots()}catch{allowedCwds.value=[]};try{const proj=await api.projects();projectList.value=proj.projects;sidebarOrder.value=proj.sidebarOrder;projectOrder.value=proj.projectOrder}catch{projectList.value=[];sidebarOrder.value={};projectOrder.value=[]};await loadSessions();await loadCapabilities();clearInterval(capabilityRefreshTimer);capabilityRefreshTimer=window.setInterval(refreshCapabilitiesOnFocus,30000);openWs();void reconcilePending()}
+async function unpair(){manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);clearInterval(capabilityRefreshTimer);wasConnectedOnce=false;ws?.close();await api.revoke().catch(()=>{});await clearAuth(false);await clearLocalState();paired.value=false;settingsOpen.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[]}
+onAuthLost(()=>{manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);clearInterval(capabilityRefreshTimer);wasConnectedOnce=false;ws?.close();void clearLocalState();paired.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[];error.value='登录已过期，请重新配对'});
+onMounted(async()=>{applyTheme(theme.value);addEventListener('online',network);addEventListener('offline',network);addEventListener('visibilitychange',refreshCapabilitiesOnFocus);addEventListener('focus',refreshCapabilitiesOnFocus);await ensureAuth();if(hasAuth())await ensureFreshToken();paired.value=hasAuth();if(paired.value){await boot()}else{paired.value=false}});
+onBeforeUnmount(()=>{manualClose=true;removeEventListener('online',network);removeEventListener('offline',network);removeEventListener('visibilitychange',refreshCapabilitiesOnFocus);removeEventListener('focus',refreshCapabilitiesOnFocus);ws?.close();clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);clearInterval(capabilityRefreshTimer)});
 async function select(session:Session){
   const generation=++selectionGeneration;
   if(active.value?.session_id==='draft'&&session.session_id!=='draft')draftCwd.value='';
-  active.value=session;drawer.value=false;loadingThread.value=true;messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false;
+  active.value=session;drawer.value=false;loadingThread.value=true;messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false;void loadCapabilities();
   try{
     let detail=await api.session(session.session_id);
     if(!detail){for(let i=0;i<3;i++){await new Promise(r=>setTimeout(r,400));if(generation!==selectionGeneration)return;detail=await api.session(session.session_id);if(detail)break}}

@@ -8,6 +8,8 @@ const props = defineProps<{
 
 const open = ref(false);
 
+const hasContent = computed(() => props.events.some(event => Boolean(event.content?.trim())));
+
 const isThinking = computed(() => {
   if (!props.events.length) return false;
   const last = props.events[props.events.length - 1];
@@ -19,7 +21,7 @@ const accumulatedText = computed(() =>
   props.events
     .map(e => e.content || '')
     .filter(Boolean)
-    .join('')
+    .join('\n\n')
 );
 
 const elapsed = computed(() => {
@@ -45,7 +47,7 @@ const previewText = computed(() => {
 </script>
 
 <template>
-  <div class="reasoning-panel" :class="{ 'reasoning-active': isThinking, 'reasoning-open': open }">
+  <div v-if="hasContent" class="reasoning-panel" :class="{ 'reasoning-active': isThinking, 'reasoning-open': open }">
     <button type="button" class="reasoning-header" @click="open = !open">
       <span class="reasoning-icon" aria-hidden="true">
         <svg v-if="isThinking" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

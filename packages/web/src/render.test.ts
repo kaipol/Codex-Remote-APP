@@ -50,4 +50,13 @@ describe('markdown renderer', () => {
     expect(out).toContain('data-local-path="E:/Codex Remote APP/SKILL.md"');
     expect(out).not.toContain('href="file:');
   });
+
+  it('renders skill and plugin references as resource markers', () => {
+    const out = renderUserMarkdown('[$ai-slop-cleaner](C:\\skills\\ai-slop-cleaner\\SKILL.md) [@Notion]');
+    expect(out).toContain('resource-link skill-resource');
+    expect(out).toContain('Ai Slop Cleaner');
+    expect(out).toContain('resource-link plugin-resource');
+    expect(out).toContain('Notion');
+    expect(out).toContain('resource-mark-icon');
+  });
 });

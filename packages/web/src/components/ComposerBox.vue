@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import type { AppOption, CodexDefaults, FileSearchResult, ModelOption, RuntimeConfig, SkillOption, UserInput } from '@remote/shared';
+import type { AppOption, CodexDefaults, FileSearchResult, ModelOption, ReasoningEffort, RuntimeConfig, SkillOption, UserInput } from '@remote/shared';
 import { api } from '../api';
 
 const props = defineProps<{ disabled: boolean; activeTurn: boolean; online: boolean; queued: number; sending: boolean; models: ModelOption[]; skills: SkillOption[]; apps: AppOption[]; defaults: CodexDefaults; capabilitiesLoading: boolean; cwd: string }>();
@@ -19,6 +19,7 @@ const model = ref('');
 const effort = ref<RuntimeConfig['effort']>('medium');
 const approvalPolicy = ref<RuntimeConfig['approvalPolicy']>('on-request');
 const sandbox = ref<RuntimeConfig['sandbox']>('workspace-write');
+const runtimeTouched = { model: false, effort: false, approvalPolicy: false, sandbox: false };
 
 // Slash command + mention picker state
 type SlashCommand = { kind: 'skill'; item: SkillOption } | { kind: 'app'; item: AppOption };
@@ -33,14 +34,27 @@ const mentionQuery = ref('');
 let searchAbort: AbortController | null = null;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
-watch(() => props.models, items => { if (!model.value && items.length) model.value = (items.find(x => x.isDefault) || items[0]).model; }, { immediate: true });
-watch(() => props.defaults, value => { if (value.model) model.value = value.model; if (value.effort) effort.value = value.effort; if (value.approvalPolicy) approvalPolicy.value = value.approvalPolicy; if (value.sandbox) sandbox.value = value.sandbox==='danger-full-access'&&!value.allowDangerFullAccess?'workspace-write':value.sandbox; }, { immediate: true });
-const effortOptions = computed(() => props.models.find(x => x.model === model.value)?.supportedReasoningEfforts.length ? props.models.find(x => x.model === model.value)!.supportedReasoningEfforts : ['minimal', 'low', 'medium', 'high', 'xhigh'] as const);
+watch(() => props.models, items => {
+  if (!items.length) return;
+  if (!model.value) model.value = (items.find(item => item.isDefault) || items[0]).model;
+  normalizeSelectedEffort(items.find(item => item.model === model.value));
+}, { immediate: true });
+watch(model, value => normalizeSelectedEffort(props.models.find(item => item.model === value)));
+watch(() => props.defaults, value => {
+  if (value.model && !runtimeTouched.model) model.value = value.model;
+  if (value.effort && !runtimeTouched.effort) effort.value = value.effort;
+  if (value.approvalPolicy && !runtimeTouched.approvalPolicy) approvalPolicy.value = value.approvalPolicy;
+  if (value.sandbox && !runtimeTouched.sandbox) sandbox.value = value.sandbox === 'danger-full-access' && !value.allowDangerFullAccess ? 'workspace-write' : value.sandbox;
+}, { immediate: true });
+const effortOptions = computed(() => props.models.find(x => x.model === model.value)?.supportedReasoningEfforts.length ? props.models.find(x => x.model === model.value)!.supportedReasoningEfforts : ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const);
 const selectedModel = computed(() => props.models.find(x => x.model === model.value));
 const accessPreset = computed(() => sandbox.value === 'danger-full-access' && approvalPolicy.value === 'never' ? 'full' : approvalPolicy.value === 'untrusted' ? 'guarded' : 'request');
 const accessLabel = computed(() => accessPreset.value === 'full' ? '完全访问' : accessPreset.value === 'guarded' ? '帮我批准' : '请求批准');
 function toggle(value: 'add' | 'access' | 'model') { menu.value = menu.value === value ? null : value; if (value === 'model') modelSection.value = 'root'; if (menu.value) emit('loadCapabilities'); }
-function setAccessPreset(value: 'request' | 'guarded' | 'full') { if (value === 'full'&&props.defaults.allowDangerFullAccess) { sandbox.value = 'danger-full-access'; approvalPolicy.value = 'never'; } else if (value === 'guarded') { sandbox.value = 'workspace-write'; approvalPolicy.value = 'untrusted'; } else { sandbox.value = 'workspace-write'; approvalPolicy.value = 'on-request'; } menu.value = null; }
+function normalizeSelectedEffort(selected:ModelOption|undefined){const options=selected?.supportedReasoningEfforts??[];if(!options.length||options.includes(effort.value as ReasoningEffort))return;effort.value=selected?.defaultReasoningEffort??options[0]}
+function chooseModel(value: string) { runtimeTouched.model = true; model.value = value; modelSection.value = 'root'; }
+function chooseEffort(value: RuntimeConfig['effort']) { runtimeTouched.effort = true; effort.value = value; modelSection.value = 'root'; }
+function setAccessPreset(value: 'request' | 'guarded' | 'full') { runtimeTouched.sandbox = true; runtimeTouched.approvalPolicy = true; if (value === 'full'&&props.defaults.allowDangerFullAccess) { sandbox.value = 'danger-full-access'; approvalPolicy.value = 'never'; } else if (value === 'guarded') { sandbox.value = 'workspace-write'; approvalPolicy.value = 'untrusted'; } else { sandbox.value = 'workspace-write'; approvalPolicy.value = 'on-request'; } menu.value = null; }
 function outside(event: PointerEvent) { if (root.value && !root.value.contains(event.target as Node)) menu.value = null; }
 onMounted(() => document.addEventListener('pointerdown', outside));
 onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
@@ -192,9 +206,9 @@ async function addFiles(list: File[]) {
     }
     try {
       const input = file.type.startsWith('image/')
-        ? { type: 'image' as const, url: await dataUrl(file), name: file.name }
+        ? { type: 'image' as const, url: await dataUrl(file), name: file.name || '粘贴图片' }
         : { type: 'text' as const, text: 'File: ' + file.name + '\n\n' + await file.text() };
-      attachments.value.push({ name: file.name, bytes: file.size, input });
+      attachments.value.push({ name: input.type === 'image' ? input.name || '粘贴图片' : file.name, bytes: file.size, input });
       total += file.size;
     } catch {
       skipped++;
@@ -208,6 +222,10 @@ async function files(event: Event) {
   if (fileInput.value) fileInput.value.value = '';
 }
 function dataUrl(file: File) { return new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = reject; reader.readAsDataURL(file); }); }
+function openAttachmentImage(url: string) {
+  if (!url.startsWith('data:image/')) return;
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
 function chooseSkill(skill: SkillOption) { selectedSkill.value = skill; menu.value = null; }
 function chooseApp(app: AppOption) { text.value += (text.value ? ' ' : '') + '[@' + app.name + '] '; menu.value = null; nextTick(() => input.value?.focus()); }
 function slashIcon(cmd: SlashCommand) { return cmd.kind === 'skill' ? '◇' : '▦'; }
@@ -225,7 +243,11 @@ function slashDesc(cmd: SlashCommand) { return cmd.kind === 'skill' ? (cmd.item.
       <div v-if="attachments.length || selectedSkill || mentions.length" class="composer-chips">
         <span v-if="selectedSkill" class="composer-chip skill-chip">技能：{{ selectedSkill.name }}<button title="移除技能" @click="selectedSkill = undefined">×</button></span>
         <span v-for="(m, index) in mentions" :key="m.path + index" class="composer-chip mention-chip">@{{ m.name }}<button title="移除引用" @click="removeMention(index)">×</button></span>
-        <span v-for="(item, index) in attachments" :key="item.name + index" class="composer-chip">{{ item.name }}<button title="移除附件" @click="attachments.splice(index, 1)">×</button></span>
+        <span v-for="(item, index) in attachments" :key="item.name + index" class="composer-attachment" :class="{ 'composer-image-attachment': item.input.type === 'image' }">
+          <img v-if="item.input.type === 'image'" class="composer-image-preview" :src="item.input.url" :alt="item.name" @click="openAttachmentImage(item.input.url)">
+          <span class="composer-attachment-name">{{ item.name }}</span>
+          <button title="移除附件" @click="attachments.splice(index, 1)">×</button>
+        </span>
       </div>
       <p v-if="attachmentError" class="composer-upload-error" role="alert">{{ attachmentError }}</p>
 
@@ -263,7 +285,7 @@ function slashDesc(cmd: SlashCommand) { return cmd.kind === 'skill' ? (cmd.item.
         <div class="composer-spacer"></div>
         <div class="composer-anchor composer-model-anchor">
           <button class="runtime-pill" title="模型和推理强度" @click="toggle('model')"><strong>{{ selectedModel?.displayName || model || '模型' }}</strong><span>{{ effort }}</span></button>
-          <div v-if="menu === 'model'" class="composer-popover model-settings-popover acrylic-panel"><section v-if="modelSection === 'root'" class="model-settings-root"><button @click="modelSection = 'models'"><b>模型</b><span>{{ selectedModel?.displayName || model || '默认' }}</span><i>›</i></button><button class="selected" @click="modelSection = 'effort'"><b>推理强度</b><span>{{ effort }}</span><i>›</i></button><div class="model-settings-divider"></div></section><section v-else-if="modelSection === 'models'" class="model-choice-panel"><h3><button class="back-button" @click="modelSection = 'root'">‹</button>模型</h3><p v-if="capabilitiesLoading && !models.length">正在读取模型…</p><button v-if="defaults.model && !models.some(item => item.model === defaults.model)" :class="{ selected: model === defaults.model }" @click="model = defaults.model; modelSection = 'root'"><span><b>{{ defaults.model }}</b><small>当前配置模型</small></span><i v-if="model === defaults.model">✓</i></button><button v-for="item in models" :key="item.id" :class="{ selected: model === item.model }" @click="model = item.model; modelSection = 'root'"><span><b>{{ item.displayName }}</b><small>{{ item.description || item.model }}</small></span><i v-if="model === item.model">✓</i></button><p v-if="!capabilitiesLoading && !models.length">没有读取到可用模型</p></section><section v-else class="effort-choice-panel"><h3><button class="back-button" @click="modelSection = 'root'">‹</button>推理强度</h3><button v-for="item in effortOptions" :key="item" :class="{ selected: effort === item }" @click="effort = item; modelSection = 'root'"><b>{{ item }}</b><i v-if="effort === item">✓</i></button></section></div>
+          <div v-if="menu === 'model'" class="composer-popover model-settings-popover acrylic-panel"><section v-if="modelSection === 'root'" class="model-settings-root"><button @click="modelSection = 'models'"><b>模型</b><span>{{ selectedModel?.displayName || model || '默认' }}</span><i>›</i></button><button class="selected" @click="modelSection = 'effort'"><b>推理强度</b><span>{{ effort }}</span><i>›</i></button><div class="model-settings-divider"></div></section><section v-else-if="modelSection === 'models'" class="model-choice-panel"><h3><button class="back-button" @click="modelSection = 'root'">‹</button>模型</h3><p v-if="capabilitiesLoading && !models.length">正在读取模型…</p><button v-if="defaults.model && !models.some(item => item.model === defaults.model)" :class="{ selected: model === defaults.model }" @click="chooseModel(defaults.model)"><span><b>{{ defaults.model }}</b><small>当前配置模型</small></span><i v-if="model === defaults.model">✓</i></button><button v-for="item in models" :key="item.id" :class="{ selected: model === item.model }" @click="chooseModel(item.model)"><span><b>{{ item.displayName }}</b><small>{{ item.description || item.model }}</small></span><i v-if="model === item.model">✓</i></button><p v-if="!capabilitiesLoading && !models.length">没有读取到可用模型</p></section><section v-else class="effort-choice-panel"><h3><button class="back-button" @click="modelSection = 'root'">‹</button>推理强度</h3><button v-for="item in effortOptions" :key="item" :class="{ selected: effort === item }" @click="chooseEffort(item)"><b>{{ item }}</b><i v-if="effort === item">✓</i></button></section></div>
         </div>
         <button v-if="activeTurn" class="stop-button" title="停止" @click="$emit('cancel')">■</button><button v-else class="send-button" title="发送" :disabled="disabled || (!text.trim() && !attachments.length && !selectedSkill && !mentions.length)" @click="submit">↑</button>
       </div>

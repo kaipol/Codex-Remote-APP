@@ -19,6 +19,7 @@ defineEmits<{ openDiff: [diff: string, title: string]; editPending: [message: Me
 const feed = ref<HTMLElement>();
 const jumpOpen = ref(false);
 const activeUserIndex = ref<number | null>(null);
+const hoveredUserPreview = ref<{ heading: string; detail: string; left: number; top: number } | null>(null);
 
 /** A segment is either a tool-call group, a reasoning panel, an error banner, or a message bubble, in timeline order. */
 type ToolSegment = { kind: 'tools'; group: BridgeEvent[] };
@@ -41,6 +42,34 @@ const toolTypes = new Set(['tool_call', 'command_execution', 'web_search', 'file
 const hiddenEventTypes = new Set(['assistant_delta', 'assistant_message', 'user_message']);
 const noiseEventTypes = new Set(['turn_started', 'turn_completed', 'turn_failed', 'session_updated']);
 
+function coalesceToolEvents(events: BridgeEvent[], finishedTurns: Map<string, string>): BridgeEvent[] {
+  const result: BridgeEvent[] = [];
+  const positions = new Map<string, number>();
+  for (const event of events) {
+    if (!toolTypes.has(event.type)) { result.push(event); continue; }
+    const identity = String(event.metadata?.call_id || event.metadata?.item_id || event.id);
+    const key = `${event.type}:${identity}`;
+    const position = positions.get(key);
+    const turnId = String(event.metadata?.turn_id || '');
+    const turnStatus = turnId ? finishedTurns.get(turnId) : undefined;
+    const normalized = turnStatus && ['inProgress', 'running', 'started'].includes(String(event.metadata?.status || ''))
+      ? { ...event, metadata: { ...event.metadata, status: turnStatus === 'failed' ? 'failed' : 'completed' } }
+      : event;
+    if (position === undefined) {
+      positions.set(key, result.length);
+      result.push(normalized);
+      continue;
+    }
+    const previous = result[position];
+    result[position] = {
+      ...previous,
+      content: normalized.content || previous.content,
+      metadata: { ...previous.metadata, ...normalized.metadata },
+    };
+  }
+  return result;
+}
+
 function groupByType(tools: BridgeEvent[]): BridgeEvent[][] {
   const groups: BridgeEvent[][] = [];
   let prevType = '';
@@ -59,6 +88,12 @@ function groupByType(tools: BridgeEvent[]): BridgeEvent[][] {
 }
 
 const timeline = computed<TurnItem[]>(() => {
+  const finishedTurns = new Map(
+    p.events
+      .filter(event => event.type === 'turn_completed' || event.type === 'turn_failed')
+      .map(event => [String(event.metadata?.turn_id || ''), event.type === 'turn_failed' ? 'failed' : 'completed'] as const)
+      .filter(([turnId]) => Boolean(turnId))
+  );
   const hiddenTurns = new Set(
     p.events
       .filter(e => e.type === 'turn_completed' || e.type === 'turn_failed')
@@ -67,10 +102,10 @@ const timeline = computed<TurnItem[]>(() => {
       .filter(Boolean)
   );
   const visibleMessages = dedupeMessages(p.messages).filter(m => !m.turn_id || !hiddenTurns.has(m.turn_id));
-  const visibleEvents = p.events
+  const visibleEvents = coalesceToolEvents(p.events
     .filter(e => !hiddenEventTypes.has(e.type))
     .filter(e => !noiseEventTypes.has(e.type))
-    .filter(e => !String(e.metadata?.turn_id || '') || !hiddenTurns.has(String(e.metadata?.turn_id)));
+    .filter(e => !String(e.metadata?.turn_id || '') || !hiddenTurns.has(String(e.metadata?.turn_id))),finishedTurns);
 
   // Sort everything by timestamp + seq, keeping tools interleaved with messages
   type RawItem =
@@ -129,6 +164,12 @@ const timeline = computed<TurnItem[]>(() => {
   function flushReasoning() {
     if (!pendingReasoning.length) return;
     if (!cur) return;
+    // Metadata-only reasoning lifecycle events should not leave an empty
+    // expandable panel in the conversation.
+    if (!pendingReasoning.some(event => Boolean(event.content?.trim()))) {
+      pendingReasoning = [];
+      return;
+    }
     cur.segments.push({ kind: 'reasoning', events: pendingReasoning });
     pendingReasoning = [];
   }
@@ -139,12 +180,14 @@ const timeline = computed<TurnItem[]>(() => {
       continue;
     }
     if (item.kind === 'compaction') {
+      if (!cur && (pendingReasoning.length || pendingTools.length)) cur = { messages: [], segments: [] };
       if (cur) { flushReasoning(); flushTools(); }
       if (!cur) cur = { messages: [], segments: [] };
       cur.segments.push({ kind: 'compaction', event: item.data });
       continue;
     }
     if (item.kind === 'error') {
+      if (!cur && (pendingReasoning.length || pendingTools.length)) cur = { messages: [], segments: [] };
       if (cur) { flushReasoning(); flushTools(); }
       if (!cur) cur = { messages: [], segments: [] };
       cur.segments.push({ kind: 'error', event: item.data });
@@ -166,7 +209,13 @@ const timeline = computed<TurnItem[]>(() => {
     }
     const msg = item.data;
     if (msg.role === 'user') {
-      if (cur) { flushReasoning(); flushTools(); result.push({ kind: 'assistant', assistant: cur }); cur = null; }
+      if (cur || pendingReasoning.length || pendingTools.length) {
+        if (!cur) cur = { messages: [], segments: [] };
+        flushReasoning();
+        flushTools();
+        result.push({ kind: 'assistant', assistant: cur });
+        cur = null;
+      }
       pendingTools = [];
       pendingReasoning = [];
       result.push({ kind: 'user', message: msg, state: p.pendingStates[msg.client_id || msg.msg_id] });
@@ -178,6 +227,7 @@ const timeline = computed<TurnItem[]>(() => {
       cur.segments.push({ kind: 'message', message: msg });
     }
   }
+  if (!cur && (pendingReasoning.length || pendingTools.length)) cur = { messages: [], segments: [] };
   if (cur) { flushReasoning(); flushTools(); result.push({ kind: 'assistant', assistant: cur }); }
   return result;
 });
@@ -191,6 +241,31 @@ function userPreview(message: Message) {
   if (text) return text.length > 90 ? `${text.slice(0, 90)}…` : text;
   return message.references?.length ? `已添加 ${message.references.length} 个引用` : '空输入';
 }
+
+function userHoverPreview(message: Message) {
+  const lines = message.content.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if (!lines.length) {
+    return { heading: userPreview(message), detail: '' };
+  }
+  const first = lines[0];
+  const heading = first.length > 48 ? `${first.slice(0, 48)}…` : first;
+  const remainder = lines.slice(1).join('\n').trim();
+  const detail = remainder.length > 280 ? `${remainder.slice(0, 280)}…` : remainder;
+  return { heading, detail };
+}
+
+function showUserPreview(event: MouseEvent | FocusEvent, message: Message) {
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  const width = Math.min(420, Math.max(240, window.innerWidth - 40));
+  const maxTop = Math.max(12, window.innerHeight - 220);
+  hoveredUserPreview.value = {
+    ...userHoverPreview(message),
+    left: Math.max(12, rect.left - width - 12),
+    top: Math.min(Math.max(12, rect.top - 8), maxTop),
+  };
+}
+
+function hideUserPreview() { hoveredUserPreview.value = null; }
 
 function isLatestUser(item: TurnItem, index: number) {
   if (item.kind !== 'user' || !item.message.content.trim()) return false;
@@ -241,6 +316,7 @@ watch(() => p.jumpTarget, target => {
   if (!target) return;
   nextTick(() => scrollToUserMessage(target.id));
 });
+watch(jumpOpen, open => { if (!open) hideUserPreview(); });
 </script>
 <template>
   <div class="timeline-shell" :class="{ 'jump-open': jumpOpen }">
@@ -275,11 +351,17 @@ watch(() => p.jumpTarget, target => {
     </button>
     <aside v-if="jumpOpen && userTurns.length > 1" class="user-jump-rail" aria-label="用户输入快捷跳转">
       <div v-if="userTurns.length" class="user-jump-list">
-        <button v-for="(turn, turnNumber) in userTurns" :key="`jump-${turn.index}`" class="user-jump-item" :class="{ active: activeUserIndex === turn.index }" :title="userPreview(turn.message)" :aria-label="`跳转到第 ${turnNumber + 1} 条用户输入`" @click="scrollToUserIndex(turn.index)">
+        <button v-for="(turn, turnNumber) in userTurns" :key="`jump-${turn.index}`" class="user-jump-item" :class="{ active: activeUserIndex === turn.index }" :aria-label="`跳转到第 ${turnNumber + 1} 条用户输入`" @mouseenter="showUserPreview($event, turn.message)" @mouseleave="hideUserPreview" @focus="showUserPreview($event, turn.message)" @blur="hideUserPreview" @click="scrollToUserIndex(turn.index)">
           <span class="user-jump-index">{{ turnNumber + 1 }}</span>
           <span>{{ userPreview(turn.message) }}</span>
         </button>
       </div>
     </aside>
+    <Teleport to="body">
+      <div v-if="hoveredUserPreview" class="user-jump-preview" role="tooltip" :style="{ left: `${hoveredUserPreview.left}px`, top: `${hoveredUserPreview.top}px` }">
+        <strong>{{ hoveredUserPreview.heading }}</strong>
+        <p v-if="hoveredUserPreview.detail">{{ hoveredUserPreview.detail }}</p>
+      </div>
+    </Teleport>
   </div>
 </template>

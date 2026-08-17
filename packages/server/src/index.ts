@@ -12,6 +12,7 @@ export function bootstrap(overrides={}){
   const ws=attachWs(server,auth,store,config.corsOrigins);
   let publishQueue=Promise.resolve();
   sessions.manager.on('event',event=>{publishQueue=publishQueue.then(async()=>{if(await sessions.canAccessEvent(event))ws.publish(event)}).catch(error=>console.warn('[remote:event] authorization failed',error))});
+  sessions.manager.on('capabilities',capabilities=>ws.publishCapabilities(capabilities));
   // Log codex app-server lifecycle events for debugging
   sessions.manager.on('debug',(info:any)=>{console.log('[codex]',info.kind,info.method??'')});
   sessions.manager.rpc.on('stderr',(line:string)=>{
@@ -33,7 +34,11 @@ if(process.env.NODE_ENV!=='test'){
   x.server.listen(x.config.port,x.config.host,()=>{
     const pair=x.auth.createPairCode();
     console.log(`Codex Remote: http://localhost:${x.config.port}`);
-    console.log(`一次性配对码: ${pair.code} (到期 ${pair.expires_at})`);
+    if(process.env.CODEX_SUPPRESS_PAIR_LOG!=='1'){
+      const yellow='\x1b[1;93m';
+      const reset='\x1b[0m';
+      console.log(`${yellow}一次性配对码: ${pair.code}${reset} (到期 ${pair.expires_at})`);
+    }
   });
   // Graceful shutdown
   let shuttingDown=false;

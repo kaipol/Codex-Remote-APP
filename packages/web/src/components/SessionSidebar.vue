@@ -62,8 +62,8 @@ const groups = computed(() => {
           const ia = orderList.indexOf(a.session_id);
           const ib = orderList.indexOf(b.session_id);
           if (ia === -1 && ib === -1) return b.updated_at.localeCompare(a.updated_at);
-          if (ia === -1) return 1;
-          if (ib === -1) return -1;
+          if (ia === -1) return -1;
+          if (ib === -1) return 1;
           return ia - ib;
         })
       : [...sessions].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updated_at.localeCompare(a.updated_at));

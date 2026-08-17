@@ -112,18 +112,21 @@ function Assert-PortsAvailable {
     throw "清理目标端口后仍被占用：$details"
 }
 
-function Start-NpmScript([string[]]$Arguments, [int]$Port = 0, [string]$ApiUrl = '') {
+function Start-NpmScript([string[]]$Arguments, [int]$Port = 0, [string]$ApiUrl = '', [switch]$SuppressPairCode) {
    $previousPort = $env:PORT
     $previousApiUrl = $env:VITE_API_URL
+   $previousSuppressPairCode = $env:CODEX_SUPPRESS_PAIR_LOG
    try {
        if ($Port -gt 0) { $env:PORT = [string]$Port }
         if ($ApiUrl) { $env:VITE_API_URL = $ApiUrl }
+       if ($SuppressPairCode) { $env:CODEX_SUPPRESS_PAIR_LOG = '1' }
        $process = Start-Process -FilePath (Get-NpmCommand) -ArgumentList $Arguments -WorkingDirectory $AppRoot -NoNewWindow -PassThru
        $StartedProcesses.Add($process)
        return $process
    } finally {
        if ($null -eq $previousPort) { Remove-Item Env:PORT -ErrorAction SilentlyContinue } else { $env:PORT = $previousPort }
         if ($null -eq $previousApiUrl) { Remove-Item Env:VITE_API_URL -ErrorAction SilentlyContinue } else { $env:VITE_API_URL = $previousApiUrl }
+       if ($null -eq $previousSuppressPairCode) { Remove-Item Env:CODEX_SUPPRESS_PAIR_LOG -ErrorAction SilentlyContinue } else { $env:CODEX_SUPPRESS_PAIR_LOG = $previousSuppressPairCode }
     }
 }
 
@@ -152,7 +155,7 @@ try {
     }
 
     Write-Host "启动后端（端口 $ServerPort）..." -ForegroundColor Cyan
-    $server = Start-NpmScript @('run', 'dev', '-w', '@remote/server') -Port $ServerPort
+    $server = Start-NpmScript @('run', 'dev', '-w', '@remote/server') -Port $ServerPort -SuppressPairCode
     Wait-Http -Url "http://127.0.0.1:$ServerPort/health" -Process $server
     Write-Host "后端已就绪：http://127.0.0.1:$ServerPort" -ForegroundColor Green
 
@@ -161,6 +164,15 @@ try {
     Wait-Http -Url "http://127.0.0.1:$WebPort/" -Process $web
     Write-Host "前端已就绪：http://127.0.0.1:$WebPort" -ForegroundColor Green
     Write-Host '按 Ctrl+C 停止前后端；退出时会清理本项目的整个进程树。' -ForegroundColor Gray
+
+    $pair = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$ServerPort/api/pair/code" -TimeoutSec 5
+    if ([string]::IsNullOrWhiteSpace([string]$pair.code)) { throw '后端未返回有效配对码。' }
+    Write-Host ''
+    Write-Host '========================================' -ForegroundColor DarkYellow
+    Write-Host '请在网页端输入以下一次性配对码：' -ForegroundColor Yellow
+    Write-Host "  $($pair.code)  " -ForegroundColor Black -BackgroundColor Yellow
+    Write-Host "有效期至：$($pair.expires_at)" -ForegroundColor Gray
+    Write-Host '========================================' -ForegroundColor DarkYellow
 
     Wait-Process -Id $web.Id
 }

@@ -6,12 +6,14 @@ export async function discoverModels(codexHome:string):Promise<ModelOption[]>{
   const source=await configSource(codexHome);
   const defaultModel=tomlString(source,'model');
   const configured=source?configuredCatalogPath(source,codexHome):undefined;
-  // A configured catalog is the operator's explicit model allowlist. Do not
-  // let an app-server refresh or a stale cache reorder it.
-  if(configured){const models=await readModelCatalogs([configured],defaultModel);if(models.length)return models}
+  const cacheCandidates=[join(codexHome,'models_cache.json'),join(codexHome,'cc-switch-model-catalog.json')];
+  // Codex Desktop appends visible built-in/cache entries after a configured
+  // provider catalog. Keep the selected catalog order, then add cache-only
+  // models so the remote picker matches the desktop picker as catalogs refresh.
+  if(configured){const [selected,cached]=await Promise.all([readModelCatalogs([configured],defaultModel),readModelCatalogs(cacheCandidates,defaultModel)]);if(selected.length)return mergeModels(selected,cached)}
   const providerModels=await fetchProviderModels(source,defaultModel);
-  if(providerModels.length)return providerModels;
-  return readModelCatalogs([join(codexHome,'models_cache.json'),join(codexHome,'cc-switch-model-catalog.json'),join(codexHome,'model-catalogs','default.json')],defaultModel);
+  if(providerModels.length)return mergeModels(providerModels,await readModelCatalogs(cacheCandidates,defaultModel));
+  return readModelCatalogs([...cacheCandidates,join(codexHome,'model-catalogs','default.json')],defaultModel);
 }
 async function readModelCatalogs(candidates:string[],defaultModel?:string):Promise<ModelOption[]>{
   const models=new Map<string,ModelOption>();
@@ -19,9 +21,10 @@ async function readModelCatalogs(candidates:string[],defaultModel?:string):Promi
     try{
       const parsed=JSON.parse(await readFile(path,'utf8')) as {models?:any[]};
       for(const item of parsed.models??[]){
+        if(item.hidden===true||String(item.visibility??'').toLowerCase()==='hide')continue;
         const model=String(item.model??item.slug??item.id??'');if(!model)continue;
         const efforts=(item.supportedReasoningEfforts??item.supported_reasoning_levels??[]).map((x:any)=>String(x.reasoningEffort??x.effort??x)).filter(isEffort);
-        models.set(model,{id:String(item.id??model),model,displayName:String(item.displayName??item.display_name??model),description:item.description?String(item.description):undefined,isDefault:Boolean(item.isDefault)||model===defaultModel,defaultReasoningEffort:effort(item.defaultReasoningEffort??item.default_reasoning_level),supportedReasoningEfforts:efforts,inputModalities:(item.inputModalities??item.input_modalities??['text']).map(String)});
+        if(!models.has(model))models.set(model,{id:String(item.id??model),model,displayName:String(item.displayName??item.display_name??model),description:item.description?String(item.description):undefined,isDefault:Boolean(item.isDefault)||model===defaultModel,defaultReasoningEffort:effort(item.defaultReasoningEffort??item.default_reasoning_level),supportedReasoningEfforts:efforts,inputModalities:(item.inputModalities??item.input_modalities??['text']).map(String)});
       }
     }catch{/* optional local cache */}
   }
@@ -112,5 +115,6 @@ async function findNamed(root:string,name:string):Promise<string[]>{
   await walk(root);return found;
 }
 function frontmatter(source:string){const block=source.match(/^---\r?\n([\s\S]*?)\r?\n---/);const out:Record<string,string>={};if(!block)return out;for(const line of block[1].split(/\r?\n/)){const match=line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);if(match)out[match[1]]=match[2].trim().replace(/^['"]|['"]$/g,'')}return out}
-function isEffort(value:string):value is ReasoningEffort{return ['none','minimal','low','medium','high','xhigh'].includes(value)}
+function mergeModels(primary:ModelOption[],extras:ModelOption[]):ModelOption[]{const merged=new Map(primary.map(item=>[item.model,item]));for(const item of extras)if(!merged.has(item.model))merged.set(item.model,item);return [...merged.values()]}
+function isEffort(value:string):value is ReasoningEffort{return ['none','minimal','low','medium','high','xhigh','max','ultra'].includes(value)}
 function effort(value:unknown):ReasoningEffort|undefined{const result=String(value??'');return isEffort(result)?result:undefined}

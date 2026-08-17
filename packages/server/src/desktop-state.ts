@@ -1,6 +1,7 @@
 import { statSync } from 'node:fs';
-import { readFile, readdir, stat } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { join, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import Database from 'better-sqlite3';
 import type { ProjectInfo, Session } from '@remote/shared';
 
@@ -85,6 +86,56 @@ export class DesktopStateReader {
       this.cache = null;
       return this.load();
     }
+  }
+
+  async registerThread(threadId:string,cwd:string):Promise<boolean>{
+    const normalizedCwd=normalizePath(cwd);
+    if(!threadId||!isAbsolute(normalizedCwd))return false;
+    for(let attempt=0;attempt<3;attempt++){
+      let raw:string;
+      let beforeMtime=0;
+      try{const [content,fileStat]=await Promise.all([readFile(this.statePath,'utf8'),stat(this.statePath)]);raw=content;beforeMtime=fileStat.mtimeMs}catch{return false}
+      let data:DesktopState;
+      try{data=JSON.parse(raw) as DesktopState}catch{return false}
+      const projects=data['local-projects']||{};
+      const project=Object.values(projects)
+        .flatMap(value=>(value.rootPaths||[]).map(root=>({value,root:normalizePath(root)})))
+        .filter(candidate=>containsPath(candidate.root,normalizedCwd))
+        .sort((a,b)=>b.root.length-a.root.length)[0]?.value;
+      const originalAssignments=data['thread-project-assignments']||{};
+      const originalOrders=data['sidebar-project-thread-orders']||{};
+      const originalProjectless=data['projectless-thread-ids']||[];
+      const originalHints=data['thread-workspace-root-hints']||{};
+      if(project&&originalAssignments[threadId]?.projectId===project.id&&originalOrders[project.id]?.threadIds?.[0]===threadId&&normalizePath(originalHints[threadId]||normalizedCwd)===normalizedCwd)return false;
+      if(!project&&!originalAssignments[threadId]&&originalProjectless[0]===threadId&&normalizePath(originalHints[threadId]||normalizedCwd)===normalizedCwd)return false;
+      const assignments={...originalAssignments};
+      const orders=Object.fromEntries(Object.entries(originalOrders).map(([id,order])=>[id,{...order,threadIds:(order.threadIds||[]).filter(value=>value!==threadId)}]));
+      const projectless=originalProjectless.filter(value=>value!==threadId);
+      const hints={...originalHints};
+      hints[threadId]=normalizedCwd;
+      if(project){
+        const currentOrder=orders[project.id]?.threadIds||[];
+        assignments[threadId]={projectKind:'local',projectId:project.id};
+        orders[project.id]={...(orders[project.id]||{}),threadIds:[threadId,...currentOrder]};
+      }else{
+        delete assignments[threadId];
+        projectless.unshift(threadId);
+      }
+      data['thread-project-assignments']=assignments;
+      data['sidebar-project-thread-orders']=orders;
+      data['projectless-thread-ids']=projectless;
+      data['thread-workspace-root-hints']=hints;
+      const formatted=raw.includes('\n')?`${JSON.stringify(data,null,2)}\n`:JSON.stringify(data);
+      const tempPath=`${this.statePath}.${process.pid}.${randomUUID()}.tmp`;
+      await writeFile(tempPath,formatted,'utf8');
+      try{
+        if((await stat(this.statePath)).mtimeMs!==beforeMtime){await unlink(tempPath).catch(()=>{});continue}
+        await rename(tempPath,this.statePath);
+        this.cache=null;
+        return true;
+      }catch(error){await unlink(tempPath).catch(()=>{});if(attempt===2)throw error}
+    }
+    return false;
   }
 
   private getDbMtime(): number {
@@ -306,3 +357,6 @@ export class DesktopStateReader {
     return result;
   }
 }
+
+function normalizePath(value:string){return resolve(value.replace(/^\\\\\?\\/,''))}
+function containsPath(root:string,candidate:string){const value=relative(root,candidate);return value===''||value!=='..'&&!value.startsWith(`..${sep}`)&&!isAbsolute(value)}

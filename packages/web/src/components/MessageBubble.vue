@@ -79,11 +79,11 @@ async function openReference(path: string | undefined) {
       <div v-if="chipReferences.length" class="message-references">
         <template v-for="(reference, i) in chipReferences" :key="i">
           <button v-if="reference.type !== 'annotation' && reference.path" class="reference-chip" :class="reference.type" :title="reference.path" type="button" @click="openReference(reference.path)">
-            <i class="reference-icon" aria-hidden="true">{{ reference.type === 'file' ? '⌘' : '◇' }}</i><b>{{ reference.label }}</b>
+            <i class="reference-icon" aria-hidden="true"><svg v-if="reference.type === 'skill'" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg><template v-else>{{ reference.type === 'file' ? '⌘' : '◇' }}</template></i><b>{{ reference.label }}</b>
             <span v-if="reference.detail" class="reference-preview"><CopyButton :text="reference.detail" label="复制批注"/><MarkdownContent :content="reference.detail"/></span>
           </button>
           <span v-else class="reference-chip" :class="reference.type" :title="reference.path">
-            <i class="reference-icon" aria-hidden="true"><span v-if="reference.type === 'annotation'" class="notebook-icon"></span><template v-else>{{ reference.type === 'file' ? '⌘' : '◇' }}</template></i><b>{{ reference.label }}</b>
+            <i class="reference-icon" aria-hidden="true"><span v-if="reference.type === 'annotation'" class="notebook-icon"></span><svg v-else-if="reference.type === 'skill'" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg><template v-else>{{ reference.type === 'file' ? '⌘' : '◇' }}</template></i><b>{{ reference.label }}</b>
             <span v-if="reference.detail" class="reference-preview"><CopyButton :text="reference.detail" label="复制批注"/><MarkdownContent :content="reference.detail"/></span>
           </span>
         </template>

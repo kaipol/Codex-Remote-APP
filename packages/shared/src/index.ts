@@ -21,13 +21,14 @@ export type EventType='user_message'|'assistant_delta'|'assistant_message'|'turn
 export interface BridgeEvent { id:string; type:EventType; session:string; timestamp:string; seq:number; role?:string; content?:string; metadata?:Record<string,unknown> }
 export interface SessionDetail extends Session { messages:Message[]; events:BridgeEvent[] }
 export interface AuthTokens { access_token:string; refresh_token:string; expires_in:number; device_id:string }
-export interface WsEnvelope { type:'hello'|'event'|'sync'|'error'; event?:BridgeEvent; events?:BridgeEvent[]; cursor?:number; stream_id?:string; message?:string }
+export type CapabilityKind='models'|'skills'|'apps'|'defaults';
+export interface WsEnvelope { type:'hello'|'event'|'sync'|'capabilities'|'error'; event?:BridgeEvent; events?:BridgeEvent[]; capabilities?:CapabilityKind[]; cursor?:number; stream_id?:string; message?:string }
 export interface PendingApproval { request_id:string; session_id:string; turn_id?:string; item_id?:string; kind:string; payload:unknown; status:'pending'; created_at:string; updated_at:string }
 export type ApprovalDecision='accept'|'decline'|'cancel';
 export interface ApprovalResolution { request_id:string;session_id:string;decision:ApprovalDecision;status:'resolved' }
 export interface SyncResponse { cursor:number; events:BridgeEvent[]; stream_id?:string; reset?:boolean; has_more?:boolean }
 export interface TurnAccepted { thread_id:string; turn_id:string; status:'started'|'interrupt_requested' }
-export type ReasoningEffort='none'|'minimal'|'low'|'medium'|'high'|'xhigh';
+export type ReasoningEffort='none'|'minimal'|'low'|'medium'|'high'|'xhigh'|'max'|'ultra';
 export type ApprovalPolicy='untrusted'|'on-failure'|'on-request'|'never';
 export type SandboxMode='read-only'|'workspace-write'|'danger-full-access';
 export interface RuntimeConfig { model?:string; effort?:ReasoningEffort; approvalPolicy?:ApprovalPolicy; sandbox?:SandboxMode }

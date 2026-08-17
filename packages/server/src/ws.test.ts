@@ -44,7 +44,8 @@ describe('WebSocket origin validation', () => {
     const auth = new AuthService(store, config);
     sessions = new SessionService(store, config);
     server = createServer(createApp(store, auth, sessions, config));
-    streams.push(attachWs(server, auth, store, config.corsOrigins));
+    const stream = attachWs(server, auth, store, config.corsOrigins);
+    streams.push(stream);
     await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as AddressInfo).port;
     const tokens = auth.pair(auth.createPairCode().code, 'origin-test')!;
@@ -66,7 +67,8 @@ describe('WebSocket origin validation', () => {
     const auth = new AuthService(store, config);
     sessions = new SessionService(store, config);
     server = createServer(createApp(store, auth, sessions, config));
-    streams.push(attachWs(server, auth, store, config.corsOrigins));
+    const stream = attachWs(server, auth, store, config.corsOrigins);
+    streams.push(stream);
     await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as AddressInfo).port;
     const tokens = auth.pair(auth.createPairCode().code, 'same-origin-test')!;
@@ -78,6 +80,11 @@ describe('WebSocket origin validation', () => {
       socket.once('error', reject);
     });
     expect(socket.readyState).toBe(WebSocket.OPEN);
+    const messages: WsEnvelope[] = [];
+    socket.on('message', data => messages.push(JSON.parse(String(data)) as WsEnvelope));
+    stream.publishCapabilities(['models','defaults']);
+    await waitFor(() => messages.some(message => message.type === 'capabilities'));
+    expect(messages.find(message => message.type === 'capabilities')?.capabilities).toEqual(['models','defaults']);
   });
 });
 

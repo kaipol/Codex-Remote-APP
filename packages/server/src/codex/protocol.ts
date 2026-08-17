@@ -54,7 +54,9 @@ export function text(value:unknown,depth=0):string {
   if(value===null||value===undefined)return '';
   if(Array.isArray(value))return value.map(v=>text(v,depth+1)).filter(Boolean).join('\n');
   const r=record(value);
-  const next=r.text??r.content??r.message??r.input_text??r.output_text;
+  const kind=typeof r.type==='string'?r.type:'';
+  if(kind==='input_image'||kind==='image'||kind==='output_image')return '';
+  const next=r.text??r.content??r.message??r.input_text??r.output_text??r.summary_text??r.reasoning_text??r.summary??r.value;
   // Guard against self-referential objects: if the extracted property is the
   // same object reference, bail out to avoid infinite recursion.
   if(next===value)return '';

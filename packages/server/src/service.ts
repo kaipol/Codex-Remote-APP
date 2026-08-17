@@ -4,7 +4,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Config } from './config.js';
 import type { Store } from './db.js';
-import { cleanConversationText, CodexSessionCatalog, extractText, parseUserContent } from './codex-sessions.js';
+import { cleanConversationText, CodexSessionCatalog, parseUserInput } from './codex-sessions.js';
 import { CodexManager } from './codex/manager.js';
 import { RpcTimeoutError,RpcUnavailableError } from './codex/json-rpc-client.js';
 import { text, type CodexThread } from './codex/protocol.js';
@@ -123,6 +123,8 @@ export class SessionService {
         updated_at: new Date(t.updated_at_ms || t.recency_at_ms || 0).toISOString(),
       }));
     all.push(...dbOnlySessions);
+    const remoteSessionIds=new Set(this.store.remoteSessionIds());
+    for(const session of all)if(remoteSessionIds.has(session.session_id)&&session.cwd)await this.desktopState.registerThread(session.session_id,session.cwd).catch(error=>console.warn('[remote:desktop] sidebar repair failed',error));
     // Enrich sessions with project info from Codex Desktop state
     const projectMap = await this.desktopState.getThreadProjectMap();
     const projectRoots = await this.desktopState.getProjectRootMap();
@@ -158,6 +160,7 @@ export class SessionService {
     const allowedCwd=await this.requireAllowedPath(cwd);
     const created = this.fromThread(await this.manager.start(allowedCwd,runtime));
     this.sessionAccess.set(created.session_id,true);
+    await this.desktopState.registerThread(created.session_id,allowedCwd).catch(error=>console.warn('[remote:desktop] sidebar registration failed',error));
     const projectMap = await this.desktopState.getThreadProjectMap();
     const projectRoots = await this.desktopState.getProjectRootMap();
     return this.applyOverlay(this.withProject(created, projectMap, projectRoots));
@@ -176,19 +179,19 @@ export class SessionService {
       if (!cwd || !this.rememberSessionAccess(id, await this.isAllowedPath(cwd))) return undefined;
       if (rollout) {
         const session = this.applyOverlay({ ...rollout, cwd });
-        return { ...session, messages: rollout.messages, events: mergeEvents(rollout.events, this.store.eventsForSession(id)) };
+        const threadMessages = thread ? threadHistoryMessages(id, thread, session.updated_at) : [];
+        const threadEvents = thread ? (thread.turns ?? []).flatMap((turn, turnIndex) => (turn.items ?? []).flatMap((item, itemIndex) => eventFromItem(id, turn.id, item, session.updated_at, turnIndex * 1000 + itemIndex + 1))) : [];
+        return {
+          ...session,
+          messages: mergeHistoryMessages(rollout.messages, threadMessages),
+          events: mergeEvents([...rollout.events, ...threadEvents], this.store.eventsForSession(id)),
+        };
       }
       if (thread) {
         this.store.ensureSession(thread);
         const session = this.applyOverlay(this.fromThread(thread));
         if (cwd) session.cwd = cwd;
-        const messages = (thread.turns ?? []).flatMap((turn, turnIndex) => (turn.items ?? []).map((item, itemIndex) => {
-          if (item.type !== 'userMessage' && item.type !== 'agentMessage') return null;
-          const role = (item.type === 'userMessage' ? 'user' : 'assistant') as 'user' | 'assistant';
-          const parsed = role === 'user' ? parseUserContent(extractText(item.content)) : { content: String(item.text ?? ''), references: [] };
-          const clientId = role === 'user' && typeof item.clientId === 'string' ? item.clientId : role === 'user' && typeof item.clientUserMessageId === 'string' ? item.clientUserMessageId : undefined;
-          return { msg_id: item.id, ...(clientId ? { client_id: clientId } : {}), turn_id: turn.id, session_id: id, role, content: cleanConversationText(parsed.content, role), ...(parsed.references.length ? { references: parsed.references } : {}), timestamp: session.updated_at, seq: turnIndex * 1000 + itemIndex + 1 };
-        }).filter((m): m is NonNullable<typeof m> => m !== null).filter(message => (message.content.trim() || message.references?.length) && !isContextSummary(message.content)));
+        const messages = threadHistoryMessages(id, thread, session.updated_at);
         const historyEvents = (thread.turns ?? []).flatMap((turn, turnIndex) => (turn.items ?? []).flatMap((item, itemIndex) => eventFromItem(id, turn.id, item, session.updated_at, turnIndex * 1000 + itemIndex + 1)));
         return { ...session, messages, events: mergeEvents(historyEvents, this.store.eventsForSession(id)) };
       }
@@ -264,6 +267,25 @@ export class SessionService {
   private async indexNames(){const names=new Map<string,string>();try{for(const line of (await readFile(join(this.codexHome,'session_index.jsonl'),'utf8')).split(/\r?\n/)){if(!line.trim())continue;try{const item=JSON.parse(line);if(typeof item.id==='string'&&typeof item.thread_name==='string'&&item.thread_name.trim())names.set(item.id,item.thread_name.trim())}catch{/* isolate malformed rows */}}}catch{/* optional index */}return names}
 }
 function publicApproval(approval:any){const {raw_id,epoch,decision,...result}=approval;return result}
+function threadHistoryMessages(sessionId:string,thread:CodexThread,timestamp:string){
+  return (thread.turns ?? []).flatMap((turn, turnIndex) => (turn.items ?? []).map((item, itemIndex) => {
+    if (item.type !== 'userMessage' && item.type !== 'agentMessage') return null;
+    const role = (item.type === 'userMessage' ? 'user' : 'assistant') as 'user' | 'assistant';
+    const parsed = role === 'user' ? parseUserInput(item.content,item.images) : { content: text(item.text ?? item.content), references: [] };
+    const clientId = role === 'user' && typeof item.clientId === 'string' ? item.clientId : role === 'user' && typeof item.clientUserMessageId === 'string' ? item.clientUserMessageId : undefined;
+    const content = cleanConversationText(parsed.content, role);
+    if ((!content.trim() && !parsed.references.length) || isContextSummary(content)) return null;
+    return { msg_id: item.id, ...(clientId ? { client_id: clientId } : {}), turn_id: turn.id, session_id: sessionId, role, content, ...(parsed.references.length ? { references: parsed.references } : {}), timestamp, seq: turnIndex * 1000 + itemIndex + 1 };
+  }).filter((message): message is NonNullable<typeof message> => message !== null));
+}
+function mergeHistoryMessages(primary:any[],extra:any[]){
+  const result=[...primary];
+  const keys=new Set(result.map(messageHistoryKey));
+  let nextSeq=Math.max(0,...result.map(message=>Number(message.seq)||0));
+  for(const message of extra){const key=messageHistoryKey(message);if(keys.has(key))continue;keys.add(key);result.push({...message,seq:++nextSeq})}
+  return result.sort((a,b)=>a.timestamp.localeCompare(b.timestamp)||a.seq-b.seq);
+}
+function messageHistoryKey(message:any){return `${message.msg_id}\u0000${message.client_id??''}\u0000${message.role}\u0000${message.turn_id??''}\u0000${message.content}`}
 function eventFromItem(session:string,turn:string,item:any,timestamp:string,seq:number):any[]{const metadata={turn_id:turn,item_id:item.id,item_type:item.type,status:item.status};if(item.type==='commandExecution')return [{id:`history:${item.id}`,type:'command_execution',session,timestamp,seq,content:item.aggregatedOutput||'',metadata:{...metadata,command:item.command,cwd:item.cwd,exit_code:item.exitCode}}];if(item.type==='fileChange')return [{id:`history:${item.id}`,type:'file_change',session,timestamp,seq,metadata:{...metadata,changes:item.changes}}];if(item.type==='reasoning'||item.type==='plan'){const content=text(item.summary??item.text??item.content);return content.trim()?[{id:`history:${item.id}`,type:'reasoning_status',session,timestamp,seq,content,metadata}]:[]}if(item.type==='contextCompaction')return [{id:`history:${item.id}`,type:'context_compaction',session,timestamp,seq,metadata}];if(item.type==='mcpToolCall'||item.type==='collabAgentToolCall')return [{id:`history:${item.id}`,type:'tool_call',session,timestamp,seq,content:text(item.result??item.error),metadata:{...metadata,server:item.server,tool:item.tool,arguments:item.arguments}}];if(item.type==='webSearch')return [{id:`history:${item.id}`,type:'web_search',session,timestamp,seq,content:String(item.query??''),metadata}];return []}
 function mergeEvents(a:any[],b:any[]){const map=new Map<string,any>();for(const event of a)map.set(`${event.type}:${event.metadata?.item_id??event.id}:${event.metadata?.phase??''}`,event);for(const event of b){const key=`${event.type}:${event.metadata?.item_id??event.id}:${event.metadata?.phase??''}`;const existing=map.get(key);if(existing)map.set(key,{...event,seq:existing.seq,timestamp:existing.timestamp});else map.set(key,event)}return [...map.values()]}
 function isContextSummary(textValue:string){return /^\s*#{1,3}\s*(?:Handoff Summary|Context (?:Summary|Compaction))\b/i.test(textValue)||/Another language model started to solve this problem/i.test(textValue)}

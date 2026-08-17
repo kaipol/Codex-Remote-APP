@@ -60,6 +60,11 @@ export function mergeBridgeEvent(state: ProjectedThread, event: BridgeEvent): Pr
     const finalMessage:Message = { msg_id:String(event.metadata?.item_id || event.id), turn_id:key, session_id:event.session, role:'assistant', content:event.content || '', timestamp:event.timestamp, seq:event.seq };
     const index = state.messages.findIndex(message => message.msg_id === streamId);
     const finalIndex = state.messages.findIndex(message => message.msg_id === finalMessage.msg_id);
+    const duplicateFinalIndex = state.messages.findIndex(message => message.role === 'assistant'
+      && message.session_id === finalMessage.session_id
+      && message.turn_id === finalMessage.turn_id
+      && message.content === finalMessage.content
+      && !message.msg_id.startsWith('stream:'));
     const messages = [...state.messages];
     if (index >= 0) {
       // If we already accumulated more content via deltas than the final
@@ -69,6 +74,8 @@ export function mergeBridgeEvent(state: ProjectedThread, event: BridgeEvent): Pr
       messages.splice(index, 1, {...finalMessage, content: streamed.length >= finalMessage.content.length ? streamed : finalMessage.content });
     } else if (finalIndex >= 0) {
       messages[finalIndex] = finalMessage;
+    } else if (duplicateFinalIndex >= 0) {
+      // A replay may use a different item id; keep the first canonical item.
     } else {
       messages.push(finalMessage);
     }
