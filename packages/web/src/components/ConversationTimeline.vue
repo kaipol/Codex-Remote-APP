@@ -13,6 +13,7 @@ const p = defineProps<{
   loading: boolean;
   pendingStates: Record<string, string>;
   activeTurn: boolean;
+  occupied?: boolean;
   jumpTarget?: { id: string; key: number } | null;
 }>();
 defineEmits<{ openDiff: [diff: string, title: string]; editPending: [message: Message] }>();
@@ -21,14 +22,12 @@ const jumpOpen = ref(false);
 const activeUserIndex = ref<number | null>(null);
 const hoveredUserPreview = ref<{ heading: string; detail: string; left: number; top: number } | null>(null);
 
-/** A segment is either a tool-call group, a reasoning panel, an error banner, or a message bubble, in timeline order. */
-type ToolSegment = { kind: 'tools'; group: BridgeEvent[] };
-type ToolClusterSegment = { kind: 'tool-cluster'; groups: BridgeEvent[][] };
-type ReasoningSegment = { kind: 'reasoning'; events: BridgeEvent[] };
+/** A segment is a merged activity group (tool calls + reasoning), a compaction banner, an error banner, or a message bubble, in timeline order. */
+type ActivitySegment = { kind: 'activity'; events: BridgeEvent[] };
 type CompactionSegment = { kind: 'compaction'; event: BridgeEvent };
 type ErrorSegment = { kind: 'error'; event: BridgeEvent };
 type MessageSegment = { kind: 'message'; message: Message };
-type Segment = ToolSegment | ToolClusterSegment | ReasoningSegment | CompactionSegment | ErrorSegment | MessageSegment;
+type Segment = ActivitySegment | CompactionSegment | ErrorSegment | MessageSegment;
 
 type TurnAssistant = {
   messages: Message[];
@@ -68,23 +67,6 @@ function coalesceToolEvents(events: BridgeEvent[], finishedTurns: Map<string, st
     };
   }
   return result;
-}
-
-function groupByType(tools: BridgeEvent[]): BridgeEvent[][] {
-  const groups: BridgeEvent[][] = [];
-  let prevType = '';
-  let grp: BridgeEvent[] = [];
-  for (const tool of tools) {
-    const tt = String(tool.metadata?.tool || tool.metadata?.command || tool.type);
-    if (prevType && tt !== prevType && grp.length) {
-      groups.push(grp);
-      grp = [];
-    }
-    grp.push(tool);
-    prevType = tt;
-  }
-  if (grp.length) groups.push(grp);
-  return groups;
 }
 
 const timeline = computed<TurnItem[]>(() => {
@@ -146,89 +128,61 @@ const timeline = computed<TurnItem[]>(() => {
 
   const result: TurnItem[] = [];
   let cur: TurnAssistant | null = null;
-  let pendingTools: BridgeEvent[] = [];
-  let pendingReasoning: BridgeEvent[] = [];
-
-  function flushTools() {
-    if (!pendingTools.length) return;
-    if (!cur) return;
-    const groups = groupByType(pendingTools);
-    if (groups.length === 1) {
-      cur.segments.push({ kind: 'tools', group: groups[0] });
-    } else {
-      cur.segments.push({ kind: 'tool-cluster', groups });
-    }
-    pendingTools = [];
+  let pendingActivity: BridgeEvent[] = [];
+  function assistant(): TurnAssistant {
+    if (!cur) cur = { messages: [], segments: [] };
+    return cur;
   }
 
-  function flushReasoning() {
-    if (!pendingReasoning.length) return;
-    if (!cur) return;
-    // Metadata-only reasoning lifecycle events should not leave an empty
-    // expandable panel in the conversation.
-    if (!pendingReasoning.some(event => Boolean(event.content?.trim()))) {
-      pendingReasoning = [];
-      return;
+  function flushActivity() {
+    if (!pendingActivity.length) return;
+    // Drop trailing lifecycle-only reasoning events that carry no visible
+    // text, so an activity group never ends with an empty reasoning panel.
+    while (pendingActivity.length && pendingActivity[pendingActivity.length - 1].type === 'reasoning_status' && !pendingActivity[pendingActivity.length - 1].content?.trim()) {
+      pendingActivity = pendingActivity.slice(0, -1);
     }
-    cur.segments.push({ kind: 'reasoning', events: pendingReasoning });
-    pendingReasoning = [];
+    if (pendingActivity.length) {
+      assistant().segments.push({ kind: 'activity', events: pendingActivity });
+    }
+    pendingActivity = [];
   }
 
   for (const item of raw) {
     if (item.kind === 'reasoning') {
-      pendingReasoning.push(item.data);
+      if (item.data.content?.trim()) pendingActivity.push(item.data);
       continue;
     }
     if (item.kind === 'compaction') {
-      if (!cur && (pendingReasoning.length || pendingTools.length)) cur = { messages: [], segments: [] };
-      if (cur) { flushReasoning(); flushTools(); }
-      if (!cur) cur = { messages: [], segments: [] };
-      cur.segments.push({ kind: 'compaction', event: item.data });
+      flushActivity();
+      assistant().segments.push({ kind: 'compaction', event: item.data });
       continue;
     }
     if (item.kind === 'error') {
-      if (!cur && (pendingReasoning.length || pendingTools.length)) cur = { messages: [], segments: [] };
-      if (cur) { flushReasoning(); flushTools(); }
-      if (!cur) cur = { messages: [], segments: [] };
-      cur.segments.push({ kind: 'error', event: item.data });
+      flushActivity();
+      assistant().segments.push({ kind: 'error', event: item.data });
       continue;
     }
-    if (item.kind === 'tool') {
-      pendingTools.push(item.data);
-      continue;
-    }
-    if (item.kind === 'event') {
-      if (cur) {
-        flushReasoning();
-        flushTools();
-        cur.segments.push({ kind: 'tools', group: [item.data] });
-      } else {
-        pendingTools.push(item.data);
-      }
+    if (item.kind === 'tool' || item.kind === 'event') {
+      pendingActivity.push(item.data);
       continue;
     }
     const msg = item.data;
     if (msg.role === 'user') {
-      if (cur || pendingReasoning.length || pendingTools.length) {
-        if (!cur) cur = { messages: [], segments: [] };
-        flushReasoning();
-        flushTools();
+      flushActivity();
+      if (cur) {
         result.push({ kind: 'assistant', assistant: cur });
         cur = null;
       }
-      pendingTools = [];
-      pendingReasoning = [];
       result.push({ kind: 'user', message: msg, state: p.pendingStates[msg.client_id || msg.msg_id] });
     } else {
-      if (!cur) cur = { messages: [], segments: [] };
-      flushReasoning();
-      flushTools();
-      cur.messages.push(msg);
-      cur.segments.push({ kind: 'message', message: msg });
+      flushActivity();
+      const target = assistant();
+      target.messages.push(msg);
+      target.segments.push({ kind: 'message', message: msg });
     }
   }
-  if (!cur && (pendingReasoning.length || pendingTools.length)) cur = { messages: [], segments: [] };
-  if (cur) { flushReasoning(); flushTools(); result.push({ kind: 'assistant', assistant: cur }); }
+  flushActivity();
+  if (cur) result.push({ kind: 'assistant', assistant: cur });
   return result;
 });
 
@@ -321,11 +275,24 @@ watch(jumpOpen, open => { if (!open) hideUserPreview(); });
 <template>
   <div class="timeline-shell" :class="{ 'jump-open': jumpOpen }">
     <div ref="feed" class="conversation">
+      <div v-if="p.occupied" class="occupied-notice" role="status">
+        <span class="occupied-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10" opacity="0.25" />
+            <path d="M12 2a10 10 0 0 1 10 10" style="transform-origin: center; animation: reasoning-spin 0.8s linear infinite;" />
+          </svg>
+        </span>
+        <span class="occupied-text">此会话正被本机 Codex 占用，等待当前回复结束后即可发送。</span>
+      </div>
       <div v-if="loading" class="timeline-state"><span class="spinner"></span>正在读取会话…</div>
-      <div v-else-if="!timeline.length" class="timeline-state empty">
+      <div v-else-if="!timeline.length && !p.occupied" class="timeline-state empty">
         <img class="empty-mark" src="/icon.svg" alt="">
         <h2>从这里开始</h2>
         <p>向 Codex 描述你的任务。历史和实时事件会保留在此处。</p>
+      </div>
+      <div v-else-if="!timeline.length && p.occupied" class="timeline-state occupied">
+        <h2>会话被本机占用</h2>
+        <p>此会话正被本机 Codex 使用。等待当前回复结束后即可发送新消息。</p>
       </div>
       <template v-for="(item, index) in timeline" :key="index">
         <div v-if="item.kind === 'user'" :data-user-index="index" :data-user-id="item.message.msg_id">

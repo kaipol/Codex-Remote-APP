@@ -14,5 +14,7 @@ export function routeNotification(method:string,params:unknown):RoutedEvent|unde
  else if(method.includes('reasoning')||method.includes('plan')){content=String(p.delta??'');if(content.trim())type='reasoning_status';}
  else if(method.includes('compaction'))type='context_compaction';
  else if(method==='error'||method==='warning'||method==='configWarning'){type='provider_error';const err=p.error??p.message;if(typeof err==='string')content=err;else if(err&&typeof err==='object'){const er=record(err);content=String(er.message??er.text??er.detail??JSON.stringify(er).slice(0,500))}else content=String(p.error??p.message??'')}
- if(!type)return undefined;return {id:randomUUID(),type,session:thread,timestamp:new Date().toISOString(),content,metadata}
+ if(!type)return undefined;
+ if(type==='user_message'&&!content?.trim()&&!(Array.isArray(metadata.references)&&metadata.references.length))return undefined;
+ return {id:randomUUID(),type,session:thread,timestamp:new Date().toISOString(),content,metadata}
 }

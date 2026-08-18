@@ -13,16 +13,48 @@ export function deriveActiveTurn(events: BridgeEvent[]): boolean {
   return [...turnStates.values()].some(Boolean);
 }
 
+export function deriveActiveTurnId(events: BridgeEvent[]): string | undefined {
+  const turnStates = new Map<string, boolean>();
+  const sorted = [...events].sort((a, b) => a.seq - b.seq || a.timestamp.localeCompare(b.timestamp));
+  for (const event of sorted) {
+    const turnId = typeof event.metadata?.turn_id === 'string' ? event.metadata.turn_id : '';
+    if (!turnId) continue;
+    if (event.type === 'turn_started') turnStates.set(turnId, true);
+    if (event.type === 'turn_completed' || event.type === 'turn_failed') turnStates.set(turnId, false);
+  }
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const turnId = sorted[i].metadata?.turn_id;
+    if (typeof turnId === 'string' && turnStates.get(turnId)) return turnId;
+  }
+  return undefined;
+}
+
+function eventIdentity(event: BridgeEvent): string {
+  const itemId = typeof event.metadata?.item_id === 'string' ? event.metadata.item_id : '';
+  const callId = typeof event.metadata?.call_id === 'string' ? event.metadata.call_id : '';
+  const turnId = typeof event.metadata?.turn_id === 'string' ? event.metadata.turn_id : '';
+  if (event.type === 'assistant_delta') {
+    const deltaIndex = event.metadata?.delta_index ?? event.metadata?.index;
+    return itemId && deltaIndex !== undefined
+      ? event.type+':'+itemId+':'+turnId+':'+String(deltaIndex)
+      : event.type+':id:'+event.id;
+  }
+  if (itemId || callId) return event.type+':'+(itemId || callId)+':'+String(event.metadata?.phase || '');
+  return event.type+':id:'+event.id;
+}
+
 export function mergeBridgeEvent(state: ProjectedThread, event: BridgeEvent): ProjectedThread {
-  // Deduplicate: skip events we've already seen (e.g. from syncAll replay)
-  if (state.events.some(item => item.id === event.id)) {
+  // Deduplicate both exact replay IDs and app-server replays that retain an
+  // item/call identity but receive a new bridge ID.
+  if (state.events.some(item => item.id === event.id || eventIdentity(item) === eventIdentity(event))) {
     return state;
   }
 
   if(event.type==='user_message'){
+    const references=event.metadata?.references as MessageReference[]|undefined;
+    if (!(event.content || '').trim() && !references?.length) return {...state,events:[...state.events,event]};
     const clientId=typeof event.metadata?.client_id==='string'?event.metadata.client_id:undefined;
     const turnId=typeof event.metadata?.turn_id==='string'?event.metadata.turn_id:undefined;
-    const references=event.metadata?.references as MessageReference[]|undefined;
     const message:Message={msg_id:String(event.metadata?.item_id||event.id),...(clientId?{client_id:clientId}:{}),...(turnId?{turn_id:turnId}:{}),session_id:event.session,role:'user',content:event.content||'',timestamp:event.timestamp,seq:event.seq,...(Array.isArray(references)&&references.length?{references}:[])};
     const index=state.messages.findIndex(item=>item.msg_id===message.msg_id
       ||Boolean(clientId&&item.client_id===clientId)

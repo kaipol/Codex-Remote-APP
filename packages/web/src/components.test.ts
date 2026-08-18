@@ -139,7 +139,7 @@ describe('message rendering controls',()=>{
 	  expect(wrapper.find('button.assistant-copy').exists()).toBe(true);
 	});
 		it('renders an assistant turn that has only tool segments without crashing',async()=>{
-		  const wrapper=mount(MessageBubble,{props:{messages:[],segments:[{kind:'tools',group:[{id:'e1',type:'tool_call',session:'s',timestamp:'2026-01-01T00:00:00Z',seq:1,metadata:{tool:'shell',arguments:{}}}]}]}});
+		  const wrapper=mount(MessageBubble,{props:{messages:[],segments:[{kind:'activity',events:[{id:'e1',type:'tool_call',session:'s',timestamp:'2026-01-01T00:00:00Z',seq:1,metadata:{tool:'shell',arguments:{}}}]}]}});
 		  expect(wrapper.find('.assistant-turn-content').exists()).toBe(true);
 		  expect(wrapper.find('.user-footer').exists()).toBe(false);
 		  expect(wrapper.find('.assistant-copy').exists()).toBe(false);
@@ -184,6 +184,45 @@ describe('message rendering controls',()=>{
 				  const wrapper=mount(ConversationTimeline,{props:{messages:[],events:[{id:'tool-only',type:'tool_call',session:'s',timestamp:'2026-08-16T00:00:00Z',seq:1,content:'done',metadata:{tool:'read',status:'completed'}}],loading:false,pendingStates:{},activeTurn:false}});
 				  expect(wrapper.find('.assistant-turn-content').exists()).toBe(true);
 				  expect(wrapper.findAll('.event-card')).toHaveLength(1);
+				 });
+				it('shows an occupied state instead of the empty home when the session is externally occupied',()=>{
+			  const wrapper=mount(ConversationTimeline,{props:{messages:[],events:[],loading:false,pendingStates:{},activeTurn:true,occupied:true}});
+			  expect(wrapper.find('.timeline-state.empty').exists()).toBe(false);
+			  expect(wrapper.find('.timeline-state.occupied').exists()).toBe(true);
+			  expect(wrapper.find('.occupied-notice').exists()).toBe(true);
+			  expect(wrapper.find('.timeline-state.occupied').text()).toContain('会话被本机占用');
+			});
+			it('keeps the empty home state when not occupied',()=>{
+			  const wrapper=mount(ConversationTimeline,{props:{messages:[],events:[],loading:false,pendingStates:{},activeTurn:false,occupied:false}});
+			  expect(wrapper.find('.timeline-state.empty').exists()).toBe(true);
+			  expect(wrapper.find('.timeline-state.occupied').exists()).toBe(false);
+			  expect(wrapper.find('.occupied-notice').exists()).toBe(false);
+			});
+			it('keeps reasoning, tools, and assistant messages in their original positions',async()=>{
+				  const wrapper=mount(ConversationTimeline,{props:{messages:[
+				    {msg_id:'u1',turn_id:'t1',session_id:'s',role:'user',content:'prompt',timestamp:'2026-08-16T00:00:00Z',seq:1},
+				    {msg_id:'a1',turn_id:'t1',session_id:'s',role:'assistant',content:'progress',timestamp:'2026-08-16T00:00:03Z',seq:6},
+				    {msg_id:'a2',turn_id:'t1',session_id:'s',role:'assistant',content:'final answer',timestamp:'2026-08-16T00:00:07Z',seq:10},
+				  ],events:[
+				    {id:'r1',type:'reasoning_status',session:'s',timestamp:'2026-08-16T00:00:01Z',seq:2,content:'first thought',metadata:{turn_id:'t1',item_id:'reasoning-1'}},
+				    {id:'r1b',type:'reasoning_status',session:'s',timestamp:'2026-08-16T00:00:01Z',seq:3,content:'first thought continued',metadata:{turn_id:'t1',item_id:'reasoning-1'}},
+				    {id:'tool-1',type:'tool_call',session:'s',timestamp:'2026-08-16T00:00:02Z',seq:4,metadata:{turn_id:'t1',item_id:'tool-1',tool:'read',status:'completed'}},
+				    {id:'tool-1b',type:'tool_call',session:'s',timestamp:'2026-08-16T00:00:02Z',seq:5,metadata:{turn_id:'t1',item_id:'tool-1b',tool:'grep',status:'completed'}},
+				    {id:'r2',type:'reasoning_status',session:'s',timestamp:'2026-08-16T00:00:04Z',seq:7,content:'second thought',metadata:{turn_id:'t1',item_id:'reasoning-2'}},
+				    {id:'tool-2-start',type:'tool_call',session:'s',timestamp:'2026-08-16T00:00:05Z',seq:8,metadata:{turn_id:'t1',item_id:'tool-2',tool:'run',status:'started',phase:'started'}},
+				    {id:'tool-2-finish',type:'tool_call',session:'s',timestamp:'2026-08-16T00:00:06Z',seq:9,content:'ok',metadata:{turn_id:'t1',item_id:'tool-2',tool:'run',status:'completed',phase:'completed'}},
+				  ],loading:false,pendingStates:{},activeTurn:false}});
+				  const assistant=wrapper.get('.assistant-turn-content');
+				  const items=[...assistant.element.querySelectorAll('.reasoning-panel, .tool-call-group, .message-bubble.assistant')];
+				  expect(items.map(item=>item.classList.contains('reasoning-panel')?'reasoning':item.classList.contains('tool-call-group')?'tool':'message')).toEqual([
+				    'tool','reasoning','message','tool','reasoning','message',
+				  ]);
+				  expect(assistant.findAll('.tool-call-group')).toHaveLength(2);
+				  expect(assistant.findAll('.tool-call-group')[0].findAll('.event-card')).toHaveLength(2);
+				  const reasoning=assistant.findAll('.reasoning-panel');
+				  expect(reasoning).toHaveLength(2);
+				  await reasoning[0].get('button.reasoning-header').trigger('click');
+				  expect(reasoning[0].get('.reasoning-body').text()).toContain('first thought continued');
 				 });
 				it('removes a reasoning panel when all reasoning events are empty',()=>{
 				  const wrapper=mount(ReasoningPanel,{props:{events:[{id:'r1',type:'reasoning_status',session:'s',timestamp:'2026-08-16T00:00:00Z',seq:1,metadata:{phase:'completed'}}]}});

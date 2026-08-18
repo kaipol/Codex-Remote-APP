@@ -41,6 +41,11 @@ describe('Codex user prompt cleanup',()=>{
     const lf='first line\nsecond line\nthird line';
     expect(cleanConversationText(crlf)).toBe(lf);
   });
+  it('removes subagent error notifications from user-visible text',()=>{
+    const notification='<subagent_notification>\n{"status":{"errored":"unexpected status 503"}}\n</subagent_notification>';
+    expect(cleanConversationText(notification)).toBe('');
+    expect(cleanConversationText(notification+'\n\n继续处理')).toBe('继续处理');
+  });
   it('extracts reasoning summary text without turning image items into text',()=>{
     expect(extractText([
       {type:'summary_text',text:'先检查历史事件'},
@@ -82,6 +87,15 @@ describe('Codex session discovery',()=>{
     await writeFile(path,line('2026-08-14T00:00:00.000Z','event_msg',{type:'user_message',turn_id:'turn-1',message:'continue'})+line('2026-08-14T00:00:00.500Z','response_item',{type:'message',turn_id:'turn-1',role:'user',content:[{type:'input_text',text:'continue'}]})+line('2026-08-14T00:00:01.000Z','event_msg',{type:'user_message',turn_id:'turn-2',message:'continue'})+line('2026-08-14T00:00:01.500Z','response_item',{type:'message',turn_id:'turn-2',role:'user',content:[{type:'input_text',text:'continue'}]}));
     try{const messages=await readRolloutMessages(path,'thread-1');expect(messages.map(message=>message.content)).toEqual(['continue','continue'])}finally{await rm(sessionsDir,{recursive:true,force:true})}
   });
+  it('does not expose a response_item subagent error as a user message',async()=>{
+    const sessionsDir=join(tmpdir(),`codex-sessions-${crypto.randomUUID()}`);const path=join(sessionsDir,'rollout-subagent-error.jsonl');
+    const line=(timestamp:string,type:string,payload:unknown)=>JSON.stringify({timestamp,type,payload})+'\n';
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,
+      line('2026-08-14T00:00:00.000Z','response_item',{type:'message',role:'user',content:[{type:'input_text',text:'<subagent_notification>\n{"status":{"errored":"unexpected status 503"}}\n</subagent_notification>'}]})+
+      line('2026-08-14T00:00:01.000Z','response_item',{type:'message',role:'user',content:[{type:'input_text',text:'真实用户请求'}]}));
+    try{expect((await readRolloutMessages(path,'thread-1')).map(message=>message.content)).toEqual(['真实用户请求'])}finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
   it('deduplicates a response_item and event_msg user message whose turn_id is nested or on task_started',async()=>{
     const sessionsDir=join(tmpdir(),`codex-sessions-${crypto.randomUUID()}`);const path=join(sessionsDir,'rollout-nested.jsonl');
     const line=(timestamp:string,type:string,payload:unknown)=>JSON.stringify({timestamp,type,payload})+'\n';
@@ -102,6 +116,23 @@ describe('Codex session discovery',()=>{
       line('2026-08-14T00:00:01.000Z','event_msg',{type:'agent_message',message:'same assistant text'})+
       line('2026-08-14T00:00:01.500Z','response_item',{type:'message',id:'msg-1',role:'assistant',content:[{type:'output_text',text:'same assistant text'}],internal_chat_message_metadata_passthrough:{turn_id:'internal-turn'}}));
     try{const messages=await readRolloutMessages(path,'thread-1');expect(messages.map(message=>message.content)).toEqual(['same assistant text'])}finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
+  it('uses rollout line numbers as the shared message and event position',async()=>{
+    const sessionsDir=join(tmpdir(),'codex-sessions-'+crypto.randomUUID());const path=join(sessionsDir,'rollout-order.jsonl');
+    const line=(type:string,payload:unknown)=>JSON.stringify({timestamp:'2026-08-14T00:00:00.000Z',type,payload})+'\n';
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,
+      line('event_msg',{type:'task_started',turn_id:'turn-a'})+
+      line('response_item',{type:'message',id:'user-1',role:'user',content:[{type:'input_text',text:'prompt'}]})+
+      line('response_item',{type:'reasoning',id:'reasoning-1',summary:[{type:'summary_text',text:'thinking'}]})+
+      line('response_item',{type:'mcpToolCall',id:'tool-1',tool:'read',status:'completed'})+
+      line('response_item',{type:'message',id:'answer-1',role:'assistant',content:[{type:'output_text',text:'answer'}]}));
+    try{
+      const [messages,events]=await Promise.all([readRolloutMessages(path,'thread-1'),readRolloutEvents(path,'thread-1')]);
+      expect([...messages.map(message=>[message.seq,message.role]),...events.filter(event=>event.type==='reasoning_status'||event.type==='tool_call').map(event=>[event.seq,event.type])].sort((a,b)=>Number(a[0])-Number(b[0]))).toEqual([
+        [2,'user'],[3,'reasoning_status'],[4,'tool_call'],[5,'assistant'],
+      ]);
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
   });
   it('deduplicates the real image prompt representations and preserves message identity',async()=>{
     const sessionsDir=join(tmpdir(),`codex-sessions-${crypto.randomUUID()}`);const path=join(sessionsDir,'rollout-image.jsonl');
@@ -180,6 +211,23 @@ describe('Codex session discovery',()=>{
         expect.objectContaining({type:'turn_completed',metadata:{turn_id:'turn-a',status:'completed'}}),
         expect.objectContaining({type:'tool_call',metadata:expect.objectContaining({turn_id:'turn-a',call_id:'call-1'})}),
       ]));
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
+  it('uses rollout entry timestamps when lifecycle payload timestamps are absent',async()=>{
+    const sessionsDir=join(tmpdir(),`codex-sessions-${crypto.randomUUID()}`);const path=join(sessionsDir,'rollout-lifecycle-fallback.jsonl');
+    const line=(timestamp:string,type:string,payload:unknown)=>JSON.stringify({timestamp,type,payload})+'\n';
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,
+      line('2026-08-14T00:00:00.000Z','event_msg',{type:'task_started',turn_id:'turn-a'})+
+      line('2026-08-14T00:00:01.000Z','response_item',{type:'reasoning',id:'reasoning-1',summary:[{type:'summary_text',text:'检查'}]})+
+      line('2026-08-14T00:00:02.000Z','event_msg',{type:'task_complete',turn_id:'turn-a'}));
+    try{
+      const events=await readRolloutEvents(path,'thread-1');
+      expect(events.map(event=>[event.type,event.timestamp,event.seq])).toEqual([
+        ['turn_started','2026-08-14T00:00:00.000Z',1],
+        ['reasoning_status','2026-08-14T00:00:01.000Z',2],
+        ['turn_completed','2026-08-14T00:00:02.000Z',3],
+      ]);
     }finally{await rm(sessionsDir,{recursive:true,force:true})}
   });
 });

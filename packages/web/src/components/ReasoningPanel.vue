@@ -14,7 +14,7 @@ const isThinking = computed(() => {
   if (!props.events.length) return false;
   const last = props.events[props.events.length - 1];
   const phase = String(last.metadata?.phase || '');
-  return phase === 'started';
+  return ['started', 'running', 'inprogress'].includes(phase.toLowerCase());
 });
 
 const accumulatedText = computed(() =>

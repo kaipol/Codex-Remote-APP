@@ -2,24 +2,36 @@
 import { computed, ref } from 'vue';
 import type { BridgeEvent } from '@remote/shared';
 import EventCard from './EventCard.vue';
+import ReasoningPanel from './ReasoningPanel.vue';
+
+const toolTypes = new Set(['tool_call', 'command_execution', 'web_search', 'file_change']);
 
 const props = defineProps<{
   events?: BridgeEvent[];
-  clusters?: BridgeEvent[][];//单个工具组
 }>();
 defineEmits<{ openDiff: [diff: string, title: string] }>();
 
 const open = ref(false);
 
-const isCluster = computed(() => Boolean(props.clusters && props.clusters.length > 1));
-const allEvents = computed(() => {
-  if (props.clusters) return props.clusters.flat();
-  return props.events ?? [];
-});
+const allEvents = computed(() => props.events ?? []);
 const totalCount = computed(() => allEvents.value.length);
-const groupCount = computed(() => props.clusters?.length ?? 1);
 
-// Activity summary based on event types
+function subgroupKind(event: BridgeEvent): 'tool' | 'reasoning' {
+  return event.type === 'reasoning_status' ? 'reasoning' : 'tool';
+}
+
+interface Subgroup { kind: 'tool' | 'reasoning'; events: BridgeEvent[] }
+const subgroups = computed<Subgroup[]>(() => {
+  const result: Subgroup[] = [];
+  for (const event of allEvents.value) {
+    const kind = subgroupKind(event);
+    const last = result[result.length - 1];
+    if (!last || last.kind !== kind) result.push({ kind, events: [event] });
+    else last.events.push(event);
+  }
+  return result;
+});
+
 interface ActivitySummary { label: string; icon: string; detail?: string; }
 const activitySummary = computed<ActivitySummary[]>(() => {
   const counts: Record<string, number> = {};
@@ -41,6 +53,7 @@ const activitySummary = computed<ActivitySummary[]>(() => {
     command_execution: { label: '运行命令', icon: '▶' },
     web_search: { label: '搜索网页', icon: '⌕' },
     file_change: { label: '编辑文件', icon: '±' },
+    reasoning_status: { label: '思考', icon: '◎' },
   };
   for (const [type, count] of Object.entries(counts)) {
     const info = typeLabel[type] || { label: type, icon: '·' };
@@ -51,14 +64,12 @@ const activitySummary = computed<ActivitySummary[]>(() => {
 
 const summaryText = computed(() => activitySummary.value.map(s => s.label).join(' · '));
 
-// Check if any event is in progress
 const isRunning = computed(() => allEvents.value.some(e => {
   const status = String(e.metadata?.status || '');
-  return status === 'inProgress' || status === 'running';
+  return ['inprogress', 'running', 'started'].includes(status.toLowerCase());
 }));
 
 const headerLabel = computed(() => {
-  if (isCluster.value) return `${groupCount.value} 组 · ${totalCount.value} 项活动`;
   if (isRunning.value && activitySummary.value.length) {
     const first = activitySummary.value[0];
     return first.detail ? `正在${first.label}：${first.detail}` : `正在${first.label}`;
@@ -66,15 +77,6 @@ const headerLabel = computed(() => {
   if (activitySummary.value.length) return summaryText.value;
   return `${totalCount.value} 项工具调用`;
 });
-
-// Per-sub-group open state, initialized lazily
-const subStates = ref<Record<number, boolean>>({});
-function toggleSub(index: number) {
-  subStates.value[index] = !subStates.value[index];
-}
-function isSubOpen(index: number) {
-  return Boolean(subStates.value[index]);
-}
 </script>
 <template>
   <div class="tool-call-group" :class="{ 'tool-group-open': open }">
@@ -99,24 +101,14 @@ function isSubOpen(index: number) {
     </button>
     <div class="tool-group-body" :class="{ 'tool-group-body-visible': open }">
       <div class="tool-group-inner">
-        <template v-if="isCluster && clusters">
-          <div v-for="(group, gi) in clusters" :key="`sub-${gi}`" class="tool-sub-group">
-            <button type="button" class="tool-sub-header" @click="toggleSub(gi)">
-              <span class="tool-chevron tool-sub-chevron" :class="{ 'tool-chevron-open': isSubOpen(gi) }">
-                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M9 6l6 6-6 6"/>
-                </svg>
-              </span>
-              <span class="tool-sub-label">{{ group.length }} 项</span>
-              <span class="tool-sub-names">{{ group.slice(0, 2).map(e => String(e.metadata?.tool || e.metadata?.command || '工具')).join('、') }}</span>
-            </button>
-            <div class="tool-sub-body" :class="{ 'tool-sub-body-visible': isSubOpen(gi) }">
-              <EventCard v-for="event in group" :key="event.id" :event="event" @open-diff="(d, t) => $emit('openDiff', d, t)" />
-            </div>
-          </div>
-        </template>
-        <template v-else>
-          <EventCard v-for="event in allEvents" :key="event.id" :event="event" @open-diff="(d, t) => $emit('openDiff', d, t)" />
+        <template v-for="(sub, si) in subgroups" :key="`sub-${si}`">
+          <ReasoningPanel
+            v-if="sub.kind === 'reasoning'"
+            :events="sub.events"
+          />
+          <template v-else>
+            <EventCard v-for="event in sub.events" :key="event.id" :event="event" @open-diff="(d, t) => $emit('openDiff', d, t)" />
+          </template>
         </template>
       </div>
     </div>

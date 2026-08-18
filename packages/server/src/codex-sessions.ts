@@ -200,7 +200,9 @@ export async function readRolloutMessages(filePath: string, sessionId: string): 
     content: record.content,
     ...(record.references?.length ? { references: record.references } : {}),
     timestamp: validDate(entries[record.entryIndex]?.timestamp) ?? new Date(0).toISOString(),
-    seq: index + 1,
+    // Events use their rollout line number as seq. Messages must use the same
+    // coordinate so equal-timestamp entries retain their original position.
+    seq: record.entryIndex + 1,
   }));
 }
 
@@ -208,28 +210,25 @@ export async function readRolloutEvents(filePath:string,sessionId:string):Promis
   const events:BridgeEvent[] = [];
   const calls = new Map<string, BridgeEvent>();
   let currentTurnId: string | undefined;
-  let seq = 1;
+  let entryIndex = 0;
   for await (const line of lines(filePath)) {
+    const seq = ++entryIndex;
     const entry = parseEntry(line);
     if (!entry) continue;
     const payload = entry.payload;
     if (!payload) continue;
     if (entry.type === 'event_msg') {
-      const lifecycle = rolloutLifecycleEvent(payload, sessionId, seq);
+      const lifecycle = rolloutLifecycleEvent(payload, sessionId, seq, entry.timestamp);
       const turnId = string(payload.turn_id ?? payload.turnId);
       if (turnId) currentTurnId = turnId;
-      if (lifecycle) {
-        events.push(lifecycle);
-        seq += 1;
-      }
+      if (lifecycle) events.push(lifecycle);
       // thread_rolled_back has no turn_id, but it implicitly fails the
       // current turn. Emit a turn_failed so deriveActiveTurn can settle.
       const msgType = string(payload.type);
       if (msgType === 'thread_rolled_back' && currentTurnId) {
         const alreadyFailed = events.some(e => (e.type === 'turn_failed' || e.type === 'turn_completed') && e.metadata?.turn_id === currentTurnId);
         if (!alreadyFailed) {
-          events.push({id:`${sessionId}:event:${seq}`,session:sessionId,timestamp:validDate(entry.timestamp)??new Date(0).toISOString(),seq,type:'turn_failed',metadata:{turn_id:currentTurnId,status:'rolled_back'}});
-          seq += 1;
+          events.push({id:sessionId+':event:'+seq+':rollback',session:sessionId,timestamp:validDate(entry.timestamp)??new Date(0).toISOString(),seq,type:'turn_failed',metadata:{turn_id:currentTurnId,status:'rolled_back'}});
         }
         currentTurnId = undefined;
       }
@@ -246,7 +245,7 @@ export async function readRolloutEvents(filePath:string,sessionId:string):Promis
           id: `${sessionId}:event:${seq}`,
           session: sessionId,
           timestamp: validDate(entry.timestamp) ?? new Date(0).toISOString(),
-          seq: seq++,
+          seq,
           type: 'context_compaction',
           content,
           metadata: { item_type: type, item_id: string(payload.id) },
@@ -273,7 +272,7 @@ export async function readRolloutEvents(filePath:string,sessionId:string):Promis
       id: `${sessionId}:event:${seq}`,
       session: sessionId,
       timestamp: validDate(entry.timestamp) ?? new Date(0).toISOString(),
-      seq: seq++,
+      seq,
       ...mapped,
       ...(turnId ? { metadata: { ...mapped.metadata, turn_id: turnId } } : {}),
     };
@@ -283,13 +282,14 @@ export async function readRolloutEvents(filePath:string,sessionId:string):Promis
   return events;
 }
 
-function rolloutLifecycleEvent(payload:Record<string, unknown>,sessionId:string,seq:number):BridgeEvent|undefined {
+function rolloutLifecycleEvent(payload:Record<string, unknown>,sessionId:string,seq:number,entryTimestamp?:string):BridgeEvent|undefined {
   const type=string(payload.type);
   const turnId=string(payload.turn_id ?? payload.turnId);
   if (!type || !turnId) return undefined;
-  if (type==='task_started') return {id:`${sessionId}:event:${seq}`,session:sessionId,timestamp:validDate(payload.started_at)??new Date(0).toISOString(),seq,type:'turn_started',metadata:{turn_id:turnId,status:'started'}};
-  if (type==='task_complete') return {id:`${sessionId}:event:${seq}`,session:sessionId,timestamp:validDate(payload.completed_at)??new Date(0).toISOString(),seq,type:'turn_completed',metadata:{turn_id:turnId,status:'completed'}};
-  if (type==='turn_aborted') return {id:`${sessionId}:event:${seq}`,session:sessionId,timestamp:validDate(payload.completed_at)??new Date(0).toISOString(),seq,type:'turn_failed',metadata:{turn_id:turnId,status:string(payload.reason)??'interrupted'}};
+  const fallback = validDate(entryTimestamp) ?? new Date(0).toISOString();
+  if (type==='task_started') return {id:sessionId+':event:'+seq,session:sessionId,timestamp:validDate(payload.started_at)??fallback,seq,type:'turn_started',metadata:{turn_id:turnId,status:'started'}};
+  if (type==='task_complete') return {id:sessionId+':event:'+seq,session:sessionId,timestamp:validDate(payload.completed_at)??fallback,seq,type:'turn_completed',metadata:{turn_id:turnId,status:'completed'}};
+  if (type==='turn_aborted') return {id:sessionId+':event:'+seq,session:sessionId,timestamp:validDate(payload.completed_at)??fallback,seq,type:'turn_failed',metadata:{turn_id:turnId,status:string(payload.reason)??'interrupted'}};
   return undefined;
 }
 
@@ -409,6 +409,7 @@ export function cleanConversationText(value:string,role:'user'|'assistant'='user
   return value.replace(/\r\n/g,'\n').replace(/\r/g,'\n')
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi,'')
     .replace(/<turn_aborted>[\s\S]*?<\/turn_aborted>/gi,'')
+    .replace(/<subagent_notification>[\s\S]*?<\/subagent_notification>/gi,'')
     .replace(/<recommended_plugins>[\s\S]*?<\/recommended_plugins>/gi,'')
     .replace(/<app-context>[\s\S]*?<\/app-context>/gi,'')
     .replace(/<skills_instructions>[\s\S]*?<\/skills_instructions>/gi,'')
@@ -513,7 +514,7 @@ function stripAnsi(value:string){return value.replace(/\u001b\[[0-?]*[ -\/]*[@-~
 
 function isUsefulUserText(text: string): boolean {
   const trimmed = text.trim();
-  return !!trimmed && !trimmed.startsWith('<environment_context>') && !trimmed.startsWith('# AGENTS.md');
+  return !!trimmed && !/^<subagent_notification>[\s\S]*<\/subagent_notification>$/i.test(trimmed) && !trimmed.startsWith('<environment_context>') && !trimmed.startsWith('# AGENTS.md');
 }
 function isContextSummary(text:string):boolean{return /^\s*#{1,3}\s*(?:Handoff Summary|Context (?:Summary|Compaction)|当前进度|进度摘要|交接摘要|上下文摘要)(?:\s|$)/i.test(text)||/Another language model started to solve this problem/i.test(text)}
 function titleFrom(text: string): string { return text.replace(/\s+/g, ' ').trim().slice(0, 120); }

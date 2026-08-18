@@ -8,13 +8,11 @@ import ReasoningPanel from './ReasoningPanel.vue';
 import CompactionBanner from './CompactionBanner.vue';
 import { api } from '../api';
 
-type ToolSegment = { kind: 'tools'; group: BridgeEvent[] };
-type ToolClusterSegment = { kind: 'tool-cluster'; groups: BridgeEvent[][] };
-type ReasoningSegment = { kind: 'reasoning'; events: BridgeEvent[] };
+type ActivitySegment = { kind: 'activity'; events: BridgeEvent[] };
 type CompactionSegment = { kind: 'compaction'; event: BridgeEvent };
 type ErrorSegment = { kind: 'error'; event: BridgeEvent };
 type MessageSegment = { kind: 'message'; message: Message };
-type Segment = ToolSegment | ToolClusterSegment | ReasoningSegment | CompactionSegment | ErrorSegment | MessageSegment;
+type Segment = ActivitySegment | CompactionSegment | ErrorSegment | MessageSegment;
 
 // Single-message mode (user) or multi-message mode (assistant turn)
 const props = defineProps<{
@@ -91,14 +89,10 @@ async function openReference(path: string | undefined) {
 
       <template v-if="isAssistant">
         <div class="assistant-turn-content">
-          <!-- Render segments in timeline order: reasoning, tool groups, compaction, messages -->
+          <!-- Render segments in timeline order: activity groups (tools + reasoning), compaction, messages -->
           <template v-for="(segment, si) in effectiveSegments" :key="`seg-${si}`">
-            <ReasoningPanel
-              v-if="segment.kind === 'reasoning'"
-              :events="segment.events"
-            />
             <CompactionBanner
-              v-else-if="segment.kind === 'compaction'"
+              v-if="segment.kind === 'compaction'"
               :event="segment.event"
             />
             <div v-else-if="segment.kind === 'error'" class="provider-error-banner">
@@ -106,13 +100,8 @@ async function openReference(path: string | undefined) {
               <span class="provider-error-text">{{ segment.event.content || '服务暂时不可用' }}</span>
             </div>
             <ToolCallGroup
-              v-else-if="segment.kind === 'tools'"
-              :events="segment.group"
-              @open-diff="(d, t) => $emit('openDiff', d, t)"
-            />
-            <ToolCallGroup
-              v-else-if="segment.kind === 'tool-cluster'"
-              :clusters="segment.groups"
+              v-else-if="segment.kind === 'activity'"
+              :events="segment.events"
               @open-diff="(d, t) => $emit('openDiff', d, t)"
             />
             <div v-else-if="segment.kind === 'message' && segment.message.content" class="message-bubble assistant" :class="{ 'message-streaming': isStreaming }">

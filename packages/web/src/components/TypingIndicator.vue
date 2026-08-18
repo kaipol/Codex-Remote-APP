@@ -13,7 +13,7 @@ const currentActivity = computed<string | undefined>(() => {
   const reversed = [...props.events].reverse();
   for (const e of reversed) {
     const status = String(e.metadata?.status || '');
-    if (status === 'inProgress' || status === 'running') {
+    if (['inprogress', 'running', 'started'].includes(status.toLowerCase()) || String(e.metadata?.phase || '').toLowerCase() === 'started') {
       if (e.type === 'command_execution' && e.metadata?.command) {
         return `运行命令：${String(e.metadata.command)}`;
       }
