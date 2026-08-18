@@ -282,7 +282,19 @@ function mergeHistoryMessages(primary:any[],extra:any[]){
   const result=[...primary];
   const keys=new Set(result.map(messageHistoryKey));
   let nextSeq=Math.max(0,...result.map(message=>Number(message.seq)||0));
-  for(const message of extra){const key=messageHistoryKey(message);if(keys.has(key))continue;keys.add(key);result.push({...message,seq:++nextSeq})}
+  for(const message of extra){
+    const key=messageHistoryKey(message);
+    if(keys.has(key))continue;
+    // The same user submission is written to the rollout and to the app-server
+    // thread with different identities (rollout fallback id vs thread item id).
+    // Keep one copy, preferring the one that carries a client_id (edit affordance).
+    const dupIndex=result.findIndex(existing=>existing.role==='user'&&message.role==='user'
+      && existing.session_id===message.session_id
+      && existing.turn_id&&message.turn_id&&existing.turn_id===message.turn_id
+      && existing.content===message.content);
+    if(dupIndex>=0){const existing=result[dupIndex];if(!existing.client_id&&message.client_id)result[dupIndex]={...existing,client_id:message.client_id,msg_id:message.msg_id};continue}
+    keys.add(key);result.push({...message,seq:++nextSeq});
+  }
   return result.sort((a,b)=>a.timestamp.localeCompare(b.timestamp)||a.seq-b.seq);
 }
 function messageHistoryKey(message:any){return `${message.msg_id}\u0000${message.client_id??''}\u0000${message.role}\u0000${message.turn_id??''}\u0000${message.content}`}
