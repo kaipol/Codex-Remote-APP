@@ -80,6 +80,7 @@
 ## 安全提醒
 
 - 配对码只能在电脑本机生成（loopback only）。
+- 设置 `PAIR_PASSWORD` 后，远程端可用该密码配对；此密码仅以 scrypt 哈希存储，密码配对的设备跨电脑重启持久保留并能自动重连。配对密码通过 ECDH（P-256）+ HKDF-SHA256 派生的 AES-256-GCM 加密传输，不会以明文上链；但该流程需要安全上下文（HTTPS、localhost 或移动端 WebView），且已认证会话流量仍建议使用 HTTPS。
 - 生产环境建议始终使用 HTTPS（Cloudflare Tunnel 或 VPS + Let's Encrypt）。
 - Android 客户端显式允许局域网 HTTP（cleartext）并关闭应用备份；公网或不可信网络仍必须使用 HTTPS。
 - 定期在设置中检查已配对设备,不需要时解除配对。

@@ -8,9 +8,11 @@ import MessageBubble from'./components/MessageBubble.vue';
 import ConversationTimeline from'./components/ConversationTimeline.vue';
 import ReasoningPanel from'./components/ReasoningPanel.vue';
 import PairingSurface from'./components/PairingSurface.vue';
+import ConnectionBanner from'./components/ConnectionBanner.vue';
 const approval={request_id:'1:1',session_id:'s',kind:'item/commandExecution/requestApproval',payload:{command:'test'},status:'pending' as const,created_at:'x',updated_at:'x'};
 describe('pairing endpoint',()=>{
- it('emits the normalized input pair with its server address',async()=>{const wrapper=mount(PairingSurface,{props:{busy:false,error:'',initialServer:'http://192.168.1.2:8787'}});await wrapper.findAll('input')[1].setValue('123456');await wrapper.get('button.primary').trigger('click');expect(wrapper.emitted('pair')?.[0]).toEqual(['123456','http://192.168.1.2:8787'])});
+ it('emits the normalized input pair with its server address',async()=>{const wrapper=mount(PairingSurface,{props:{busy:false,error:'',initialServer:'http://192.168.1.2:8787'}});await wrapper.findAll('input')[1].setValue('123456');await wrapper.get('button.primary').trigger('click');expect(wrapper.emitted('pair')?.[0]).toEqual(['code','123456','http://192.168.1.2:8787'])});
+ it('defaults to the password tab when the server advertises a pair password',async()=>{vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({code:true,password:true}),{status:200,headers:{'content-type':'application/json'}})));const wrapper=mount(PairingSurface,{props:{busy:false,error:'',initialServer:'http://192.168.1.5:8787'}});await wrapper.get('input[type=url]').setValue('http://192.168.1.6:8787');await new Promise(r=>setTimeout(r,500));expect((wrapper.vm as any).mode).toBe('password');expect(wrapper.find('.pair-tab.active').text()).toContain('配对密码');vi.unstubAllGlobals()});
 });
 describe('approval decisions',()=>{
  it('emits an accept decision',async()=>{const wrapper=mount(ApprovalSheet,{props:{open:true,approvals:[approval]}});expect(wrapper.text()).toContain('Codex 请求确认');await wrapper.find('button.primary').trigger('click');expect(wrapper.emitted('decide')?.[0]).toEqual([approval,'accept'])});
@@ -238,3 +240,20 @@ describe('message rendering controls',()=>{
 				  expect(wrapper.get('.reasoning-body').text()).toContain('再合并重复项');
 				 });
 				});
+
+describe('connection banner offline states',()=>{
+  it('shows the server-offline message when the server is unreachable but the phone is online',()=>{
+    const wrapper=mount(ConnectionBanner,{props:{online:true,ws:'connecting',appServer:'ready',pending:0,serverOffline:true}});
+    expect(wrapper.text()).toContain('服务器离线');
+    expect(wrapper.text()).toContain('缓存对话');
+  });
+  it('hides the banner when everything is healthy',()=>{
+    const wrapper=mount(ConnectionBanner,{props:{online:true,ws:'connected',appServer:'ready',pending:0,serverOffline:false}});
+    expect(wrapper.find('.connection-banner').exists()).toBe(false);
+  });
+  it('prefers the navigator-offline message over server-offline',()=>{
+    const wrapper=mount(ConnectionBanner,{props:{online:false,ws:'connecting',appServer:'ready',pending:0,serverOffline:true}});
+    expect(wrapper.text()).toContain('离线模式');
+    expect(wrapper.text()).not.toContain('服务器离线');
+  });
+});

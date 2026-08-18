@@ -118,6 +118,28 @@ export async function pair(code:string){
   return auth;
 }
 
+async function fetchServerPublicKey(baseUrl:string):Promise<string>{let base=baseUrl;while(base.endsWith('/'))base=base.slice(0,-1);const r=await fetch(base+'/api/pair/public-key',{headers:{'content-type':'application/json'}});if(!r.ok)throw new Error('无法获取服务器公钥');const data=await r.json() as {public_key:string};return data.public_key}
+function b64ToBytes(b64:string):ArrayBuffer{const bin=atob(b64);const out=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)out[i]=bin.charCodeAt(i);return out.buffer}
+function bytesToB64(bytes:Uint8Array):string{let bin='';for(let i=0;i<bytes.length;i++)bin+=String.fromCharCode(bytes[i]);return btoa(bin)}
+async function encryptPasswordForServer(password:string,serverPublicKeyB64:string):Promise<{clientPublicKey:string;iv:string;ciphertext:string}>{const enc=new TextEncoder();const serverPub=await crypto.subtle.importKey('spki',b64ToBytes(serverPublicKeyB64),{name:'ECDH',namedCurve:'P-256'},false,[]);const kp=await crypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);const shared=await crypto.subtle.deriveBits({name:'ECDH',public:serverPub},kp.privateKey,256);const sharedKey=await crypto.subtle.importKey('raw',shared,'HKDF',false,['deriveKey']);const salt=enc.encode('codex-remote-pair');const info=enc.encode('pair-password-v1');const aesKey=await crypto.subtle.deriveKey({name:'HKDF',hash:'SHA-256',salt,info},sharedKey,{name:'AES-GCM',length:256},false,['encrypt']);const iv=crypto.getRandomValues(new Uint8Array(12));const encrypted=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},aesKey,enc.encode(password)));const clientPub=new Uint8Array(await crypto.subtle.exportKey('spki',kp.publicKey));return {clientPublicKey:bytesToB64(clientPub),iv:bytesToB64(iv),ciphertext:bytesToB64(encrypted)}}
+export async function pairWithPassword(password:string){
+  await initAuth();
+  console.info('[remote:pair] requesting password pairing');
+  if(!crypto.subtle)throw new Error('当前页面不是安全上下文（HTTPS 或 localhost），无法加密传输配对密码');
+  const serverPub=await fetchServerPublicKey(apiBase());
+  const blob=await encryptPasswordForServer(password,serverPub);
+  const result=await call<AuthTokens>('/api/pair/password',{method:'POST',body:JSON.stringify({...blob,device_name:navigator.userAgent.slice(0,60)})});
+  auth=result;
+  await secureStore(auth);
+  console.info('[remote:pair] password pairing accepted');
+  return auth;
+}
+
+export interface PairMethods{code:boolean;password:boolean}
+export async function pairMethods():Promise<PairMethods>{await initAuth();return call<PairMethods>('/api/pair/methods')}
+/** Probe a specific server (before pairing) for which pairing methods it accepts. Used by the pairing screen to show/hide the password tab against the URL the user just typed. */
+export async function pairMethodsAt(baseUrl:string):Promise<PairMethods>{const base=baseUrl.replace(/\/+$/,'');try{const r=await fetch(base+'/api/pair/methods',{headers:{'content-type':'application/json'}});if(!r.ok)return {code:true,password:false};return await r.json() as PairMethods}catch{return {code:true,password:false}}}
+
 export async function ensureAuth():Promise<void>{await initAuth()}
 
 // Force-refresh the token (used before WebSocket reconnect to avoid 401 on upgrade)
@@ -131,6 +153,9 @@ export const api={
   sessions:()=>call<Session[]>('/api/sessions'),
 	  refreshSessions:()=>call<Session[]>('/api/sessions/refresh',{method:'POST'}),
 	  revoke:()=>call<void>('/api/auth/device',{method:'DELETE'}),
+	  setPairPassword:(password:string)=>call<void>('/api/pair/password/config',{method:'POST',body:JSON.stringify({password})}),
+	  clearPairPassword:()=>call<void>('/api/pair/password/config',{method:'DELETE'}),
+	  pairStatus:()=>call<{code:boolean;password:boolean}>('/api/pair/methods'),
   session:(id:string)=>call<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
   create:(cwd:string,runtime?:RuntimeConfig)=>call<Session>('/api/sessions',{method:'POST',body:JSON.stringify({cwd,runtime})}),
   update:(id:string,changes:{title?:string;status?:SessionStatus;pinned?:boolean})=>call<Session>(`/api/sessions/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify(changes)}),

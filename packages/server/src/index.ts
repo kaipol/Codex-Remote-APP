@@ -4,8 +4,11 @@ export function bootstrap(overrides={}){
   const config=loadConfig(overrides);
   const store=new Store(config.databasePath);
   const auth=new AuthService(store,config);
-  // A service restart starts a new trust session. Browser reloads keep their
-  // encrypted local token, but the next request must pair against this process.
+  // Seed the pair password from PAIR_PASSWORD the first time, so a client that
+  // paired with the password can reconnect automatically after a host restart.
+  // Only the short-lived one-time-code devices are revoked; password-paired
+  // (persistent) devices stay valid, letting reconnects succeed on their own.
+  auth.bootstrapPairPassword();
   auth.invalidateDevicesOnStartup();
   const sessions=new SessionService(store,config);
   const server=createServer(createApp(store,auth,sessions,config));
@@ -38,6 +41,7 @@ if(process.env.NODE_ENV!=='test'){
       const yellow='\x1b[1;93m';
       const reset='\x1b[0m';
       console.log(`${yellow}一次性配对码: ${pair.code}${reset} (到期 ${pair.expires_at})`);
+      if(x.auth.hasPairPassword())console.log(`${yellow}已配置配对密码${reset}: 远程端可直接用密码配对并跨重启自动重连`);
     }
   });
   // Graceful shutdown

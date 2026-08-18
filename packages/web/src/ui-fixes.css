@@ -999,6 +999,25 @@ body,
   justify-content: center !important;
   padding: 20px !important;
 }
+
+/* Pairing screen: code/password tabs, password reveal toggle, persistent hint. */
+.pair-tabs { display: flex; gap: 6px; margin: 4px 0 2px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.pair-tab { flex: 1; padding: 9px 10px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font-size: 14px; font-weight: 520; cursor: pointer; transition: background .12s, color .12s; }
+.pair-tab:hover { background: var(--surface-strong); color: var(--text); }
+.pair-tab.active { background: var(--accent-soft); color: var(--accent); }
+.pair-hint { margin: -2px 0 4px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+label > .password-toggle { position: absolute; right: 10px; bottom: 9px; padding: 2px 8px; border-radius: 7px; background: var(--surface); color: var(--muted); font-size: 12px; cursor: pointer; user-select: none; }
+label > .password-toggle:hover { background: var(--surface-strong); color: var(--text); }
+
+/* Settings: pair password configuration row. */
+.password-config-row { flex-direction: column; align-items: stretch; gap: 8px; }
+.password-config-row > div { display: flex; flex-direction: column; gap: 6px; }
+.password-input { display: flex; gap: 6px; align-items: stretch; }
+.password-input input { flex: 1; min-width: 0; height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); outline: 0; }
+.password-input input:focus { border-color: var(--accent); }
+.password-input .text-button { flex: none; height: 40px; align-self: center; }
+.form-ok { margin: 2px 0 0; color: var(--accent); font-size: 12px; }
+
 .approval-sheet {
   width: min(620px, calc(100vw - 40px)) !important;
   max-height: min(78dvh, 720px) !important;
