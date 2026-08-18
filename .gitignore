@@ -11,3 +11,10 @@ packages/web/public/workbox-*.js
 .DS_Store
 *.tsbuildinfo
 __pycache__/
+
+# Backup files
+*.bak
+
+# Debug/QA screenshots
+packages/web/screenshots/
+
