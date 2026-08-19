@@ -34,19 +34,28 @@ export function bootstrap(overrides={}){
 if(process.env.NODE_ENV!=='test'){
   const x=bootstrap();
   x.server.on('error',(e:NodeJS.ErrnoException)=>{console.error('[server] listen error:',e.message);if(e.code==='EADDRINUSE'){console.error(`[server] port ${x.config.port} already in use. Stop other processes or change PORT in .env`);process.exit(1)}});
-  x.server.listen(x.config.port,x.config.host,()=>{
+  // Generate a fresh pairing code on startup and again whenever the current
+  // one expires, so a valid code is always available without restarting.
+  let pairCodeTimer:ReturnType<typeof setTimeout>|undefined;
+  const emitPairCode=()=>{
     const pair=x.auth.createPairCode();
-    console.log(`Codex Remote: http://localhost:${x.config.port}`);
     if(process.env.CODEX_SUPPRESS_PAIR_LOG!=='1'){
       const yellow='\x1b[1;93m';
       const reset='\x1b[0m';
       console.log(`${yellow}一次性配对码: ${pair.code}${reset} (到期 ${pair.expires_at})`);
       if(x.auth.hasPairPassword())console.log(`${yellow}已配置配对密码${reset}: 远程端可直接用密码配对并跨重启自动重连`);
     }
+    const timer=setTimeout(emitPairCode,x.config.pairTtl*1000);
+    timer.unref();
+    pairCodeTimer=timer;
+  };
+  x.server.listen(x.config.port,x.config.host,()=>{
+    console.log(`Codex Remote: http://localhost:${x.config.port}`);
+    emitPairCode();
   });
   // Graceful shutdown
   let shuttingDown=false;
-  const shutdown=async(signal:string)=>{if(shuttingDown)return;shuttingDown=true;console.log(`\n[server] ${signal} received, shutting down…`);const force=setTimeout(()=>process.exit(1),5000);force.unref();try{await x.sessions.manager.close()}catch{}x.ws.close();await new Promise<void>(resolve=>x.server.close(()=>resolve()));x.store.close();clearTimeout(force);process.exitCode=0};
+  const shutdown=async(signal:string)=>{if(shuttingDown)return;shuttingDown=true;console.log(`\n[server] ${signal} received, shutting down…`);clearTimeout(pairCodeTimer);const force=setTimeout(()=>process.exit(1),5000);force.unref();try{await x.sessions.manager.close()}catch{}x.ws.close();await new Promise<void>(resolve=>x.server.close(()=>resolve()));x.store.close();clearTimeout(force);process.exitCode=0};
   process.on('SIGINT',()=>void shutdown('SIGINT'));
   process.on('SIGTERM',()=>void shutdown('SIGTERM'));
 }

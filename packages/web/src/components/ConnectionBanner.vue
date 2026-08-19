@@ -1,5 +1,6 @@
 <script setup lang="ts">
 defineProps<{online:boolean;ws:string;appServer:string;pending:number;serverOffline:boolean}>();
+defineEmits<{openOutbox:[]}>();
 </script>
 <template>
   <div v-if="!online||ws!=='connected'||appServer==='error'||pending||serverOffline" class="connection-banner" :class="{warning:online,error:appServer==='error'}" role="status">
@@ -9,6 +10,6 @@ defineProps<{online:boolean;ws:string;appServer:string;pending:number;serverOffl
     <span v-else-if="ws==='connecting'">连接中断 · 正在同步并重连…</span>
     <span v-else-if="ws==='offline'">无法连接 · 请检查网络</span>
     <span v-else-if="appServer==='error'">Codex app-server 暂不可用</span>
-    <span v-else>{{pending}} 条消息等待发送</span>
+    <button v-if="pending" class="connection-outbox" @click="$emit('openOutbox')">{{pending}} 条消息 · 查看队列</button>
   </div>
 </template>

@@ -22,9 +22,22 @@ const DELETED_SESSIONS_DIRECTORY = '.codex-session-delete';
 
 export class CodexSessionCatalog {
   private sessions = new Map<string, DiscoveredCodexSession>();
+  private lastRefreshAt = 0;
+  private readonly refreshTtlMs = 5_000;
+  private refreshInFlight: Promise<DiscoveredCodexSession[]> | null = null;
   constructor(readonly sessionsDir: string) {}
 
-  async refresh(): Promise<DiscoveredCodexSession[]> {
+  async refresh(force = false): Promise<DiscoveredCodexSession[]> {
+    if (!force && Date.now() - this.lastRefreshAt < this.refreshTtlMs) {
+      return this.listCached();
+    }
+    if (this.refreshInFlight) return this.refreshInFlight;
+    const tracked = this.doRefresh().finally(() => { if (this.refreshInFlight === tracked) this.refreshInFlight = null; });
+    this.refreshInFlight = tracked;
+    return tracked;
+  }
+
+  private async doRefresh(): Promise<DiscoveredCodexSession[]> {
     const candidates = preferRepresentations(await findRollouts(this.sessionsDir));
     const parsed = await Promise.all(candidates.map(async path => {
       try { return await inspectRollout(path); } catch { return undefined; }
@@ -39,6 +52,7 @@ export class CodexSessionCatalog {
       }
     }
     this.sessions = next;
+    this.lastRefreshAt = Date.now();
     return this.listCached();
   }
 
@@ -77,33 +91,45 @@ async function readRolloutEntries(filePath: string): Promise<Entry[]> {
   return entries;
 }
 
-function abortedRolloutRanges(entries: Entry[]): Set<number> {
-  const ranges = new Set<number>();
+function abortedRolloutRanges(entries: Entry[]): { skipped: Set<number>; rolledBack: Set<number> } {
+  // `skipped` covers every entry in an aborted or rolled-back turn range:
+  // non-message entries (reasoning, tool calls, lifecycle markers) in those
+  // ranges are skipped so the timeline stays clean.
+  // `rolledBack` is the strict subset whose turn was *rolled back* (erased).
+  // Messages from those ranges are dropped too, so a duplicate user message
+  // that was submitted, then rolled back and retried, never wins client-side
+  // dedup and disappears along with the hidden turn. `turn_aborted` only
+  // interrupts; its readable user/assistant text is kept.
+  const skipped = new Set<number>();
+  const rolledBack = new Set<number>();
   let currentTurnStart = -1;
   let abortPending = false;
+  let rollbackPending = false;
   for (let i = 0; i < entries.length; i++) {
     const p = entries[i].payload ?? {};
     if (entries[i].type === 'event_msg' && p.type === 'task_started') {
       if (abortPending && currentTurnStart >= 0) {
-        for (let j = currentTurnStart; j < i; j++) ranges.add(j);
+        for (let j = currentTurnStart; j < i; j++) { skipped.add(j); if (rollbackPending) rolledBack.add(j); }
       }
       currentTurnStart = i;
       abortPending = false;
+      rollbackPending = false;
     } else if (entries[i].type === 'event_msg' && (p.type === 'turn_aborted' || p.type === 'thread_rolled_back')) {
       if (currentTurnStart >= 0) {
-        for (let j = currentTurnStart; j <= i; j++) ranges.add(j);
+        for (let j = currentTurnStart; j <= i; j++) { skipped.add(j); if (p.type === 'thread_rolled_back' || rollbackPending) rolledBack.add(j); }
         abortPending = true;
+        if (p.type === 'thread_rolled_back') rollbackPending = true;
       }
     }
   }
   if (abortPending && currentTurnStart >= 0) {
-    for (let j = currentTurnStart; j < entries.length; j++) ranges.add(j);
+    for (let j = currentTurnStart; j < entries.length; j++) { skipped.add(j); if (rollbackPending) rolledBack.add(j); }
   }
-  return ranges;
+  return { skipped, rolledBack };
 }
 
 function collectRolloutMessages(entries: Entry[]): RolloutMessageRecord[] {
-  const skipped = abortedRolloutRanges(entries);
+  const { skipped, rolledBack } = abortedRolloutRanges(entries);
   const records: RolloutMessageRecord[] = [];
   const byKey = new Map<string, number>();
   let currentTurnId: string | undefined;
@@ -114,10 +140,13 @@ function collectRolloutMessages(entries: Entry[]): RolloutMessageRecord[] {
       const startedTurnId = string(payload.turn_id) ?? string(payload.turnId);
       if (startedTurnId) currentTurnId = startedTurnId;
     }
-    // A turn marked aborted (turn_aborted/thread_rolled_back) was interrupted,
-    // not erased. Keep its user/assistant text messages so the history stays
-    // readable; only skip the non-message entries that belong to the aborted
-    // range.
+    // A thread rolled back has its work erased. Drop its messages too so a
+    // duplicate user message that was submitted, rolled back, then retried
+    // never wins client-side dedup and disappears along with the hidden turn.
+    if (rolledBack.has(i)) continue;
+    // A turn marked aborted (turn_aborted) was interrupted, not erased. Keep
+    // its user/assistant text messages so the history stays readable; only
+    // skip the non-message entries that belong to the aborted range.
     if (skipped.has(i) && !messageFromEntry(entry)) continue;
     let value = messageFromEntry(entry);
     if (value && currentTurnId) {
@@ -226,8 +255,16 @@ export async function readRolloutEvents(filePath:string,sessionId:string):Promis
       // current turn. Emit a turn_failed so deriveActiveTurn can settle.
       const msgType = string(payload.type);
       if (msgType === 'thread_rolled_back' && currentTurnId) {
-        const alreadyFailed = events.some(e => (e.type === 'turn_failed' || e.type === 'turn_completed') && e.metadata?.turn_id === currentTurnId);
-        if (!alreadyFailed) {
+        // A rolled-back turn is erased whether it previously completed or was
+        // aborted. Mark/upgrade its lifecycle to rolled_back so the web
+        // client's hiddenTurns (ConversationTimeline) hides the turn's
+        // duplicate user message, partial reply, and any stray tool activity,
+        // and so deriveActiveTurn can settle. Without this, an aborted-then-
+        // rolled-back turn would keep status 'interrupted' and leak its events.
+        const existingIndex = events.findIndex(e => e.type === 'turn_failed' && e.metadata?.turn_id === currentTurnId);
+        if (existingIndex >= 0) {
+          events[existingIndex] = { ...events[existingIndex], metadata: { ...events[existingIndex].metadata, turn_id: currentTurnId, status: 'rolled_back' } };
+        } else {
           events.push({id:sessionId+':event:'+seq+':rollback',session:sessionId,timestamp:validDate(entry.timestamp)??new Date(0).toISOString(),seq,type:'turn_failed',metadata:{turn_id:currentTurnId,status:'rolled_back'}});
         }
         currentTurnId = undefined;
@@ -405,8 +442,16 @@ export function extractText(value: unknown, depth = 0): string {
 }
 
 export function cleanConversationText(value:string,role:'user'|'assistant'='user'):string{
-  if(role==='assistant')return value.replace(/\r\n/g,'\n');
-  return value.replace(/\r\n/g,'\n').replace(/\r/g,'\n')
+  // Codex Desktop prepends/appends ⚠ notice lines (model-switch, reconnect
+  // attempts, backend 502, model-metadata warnings, …) to a message it
+  // records. Drop every line that starts with U+26A0 (+ optional U+FE0F) so
+  // single and multi-line notices alike are hidden, while a ⚠ that appears
+  // mid-body of a real prompt (e.g. "所有包含⚠的警告…") is preserved because
+  // it is not at a line start. Authors face the same risk on both sides.
+  const stripped = value.replace(/\r\n/g,'\n').replace(/\r/g,'\n')
+    .replace(/^\u26a0\ufe0f?[^\n]*\n?/gim,'');
+  if(role==='assistant')return stripped;
+  return stripped
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi,'')
     .replace(/<turn_aborted>[\s\S]*?<\/turn_aborted>/gi,'')
     .replace(/<subagent_notification>[\s\S]*?<\/subagent_notification>/gi,'')
@@ -516,7 +561,7 @@ function isUsefulUserText(text: string): boolean {
   const trimmed = text.trim();
   return !!trimmed && !/^<subagent_notification>[\s\S]*<\/subagent_notification>$/i.test(trimmed) && !trimmed.startsWith('<environment_context>') && !trimmed.startsWith('# AGENTS.md');
 }
-function isContextSummary(text:string):boolean{return /^\s*#{1,3}\s*(?:Handoff Summary|Context (?:Summary|Compaction)|当前进度|进度摘要|交接摘要|上下文摘要)(?:\s|$)/i.test(text)||/Another language model started to solve this problem/i.test(text)}
+function isContextSummary(text:string):boolean{return /^\s*#{0,3}\s*(?:Task Handoff Summary|Handoff Summary|Context (?:Summary|Compaction(?: Summary)?)|当前进度|进度摘要|交接摘要|上下文摘要)(?:\s|$)/i.test(text)||/Another language model started to solve this problem/i.test(text)}
 function titleFrom(text: string): string { return text.replace(/\s+/g, ' ').trim().slice(0, 120); }
 function string(value: unknown): string | undefined { return typeof value === 'string' && value ? value : undefined; }
 function timeValue(value: unknown): number { const n = typeof value === 'string' ? Date.parse(value) : NaN; return Number.isFinite(n) ? n : 0; }

@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { AppOption, CodexDefaults, FileSearchResult, ModelOption, ReasoningEffort, RuntimeConfig, SkillOption, UserInput } from '@remote/shared';
 import { api } from '../api';
 
-const props = defineProps<{ disabled: boolean; activeTurn: boolean; online: boolean; queued: number; sending: boolean; models: ModelOption[]; skills: SkillOption[]; apps: AppOption[]; defaults: CodexDefaults; capabilitiesLoading: boolean; cwd: string }>();
+const props = defineProps<{ disabled: boolean; activeTurn: boolean; occupied?: boolean; online: boolean; queued: number; sending: boolean; models: ModelOption[]; skills: SkillOption[]; apps: AppOption[]; defaults: CodexDefaults; capabilitiesLoading: boolean; cwd: string }>();
 const emit = defineEmits<{ send: [payload: { text: string; input: UserInput[]; runtime: RuntimeConfig }]; cancel: []; loadCapabilities: [] }>();
 const root = ref<HTMLElement>();
 const text = ref('');
@@ -11,6 +11,7 @@ const input = ref<HTMLTextAreaElement>();
 const fileInput = ref<HTMLInputElement>();
 const menu = ref<'add' | 'access' | 'model' | null>(null);
 const modelSection = ref<'root' | 'models' | 'effort'>('root');
+const modelQuery = ref('');
 const selectedSkill = ref<SkillOption>();
 const attachments = ref<Array<{ name: string; bytes: number; input: UserInput }>>([]);
 const attachmentError = ref('');
@@ -48,14 +49,23 @@ watch(() => props.defaults, value => {
 }, { immediate: true });
 const effortOptions = computed(() => props.models.find(x => x.model === model.value)?.supportedReasoningEfforts.length ? props.models.find(x => x.model === model.value)!.supportedReasoningEfforts : ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const);
 const selectedModel = computed(() => props.models.find(x => x.model === model.value));
+const filteredModels = computed(() => {
+  const query = modelQuery.value.trim().toLowerCase();
+  return [...props.models]
+    .filter(item => !query || [item.model, item.displayName, item.description].some(value => value?.toLowerCase().includes(query)))
+    .sort((a, b) => Number(b.model === model.value) - Number(a.model === model.value));
+});
+const configuredModelVisible = computed(() => props.defaults.model && !props.models.some(item => item.model === props.defaults.model) && (!modelQuery.value.trim() || props.defaults.model.toLowerCase().includes(modelQuery.value.trim().toLowerCase())));
 const accessPreset = computed(() => sandbox.value === 'danger-full-access' && approvalPolicy.value === 'never' ? 'full' : approvalPolicy.value === 'untrusted' ? 'guarded' : 'request');
 const accessLabel = computed(() => accessPreset.value === 'full' ? '完全访问' : accessPreset.value === 'guarded' ? '帮我批准' : '请求批准');
-function toggle(value: 'add' | 'access' | 'model') { menu.value = menu.value === value ? null : value; if (value === 'model') modelSection.value = 'root'; if (menu.value) emit('loadCapabilities'); }
+function toggle(value: 'add' | 'access' | 'model') { menu.value = menu.value === value ? null : value; if (value === 'model') { modelSection.value = 'root'; modelQuery.value = ''; } if (menu.value) emit('loadCapabilities'); }
+function openModelList() { modelSection.value = 'models'; modelQuery.value = ''; }
 function normalizeSelectedEffort(selected:ModelOption|undefined){const options=selected?.supportedReasoningEfforts??[];if(!options.length||options.includes(effort.value as ReasoningEffort))return;effort.value=selected?.defaultReasoningEffort??options[0]}
-function chooseModel(value: string) { runtimeTouched.model = true; model.value = value; modelSection.value = 'root'; }
+function chooseModel(value: string) { runtimeTouched.model = true; model.value = value; modelSection.value = 'root'; modelQuery.value = ''; }
 function chooseEffort(value: RuntimeConfig['effort']) { runtimeTouched.effort = true; effort.value = value; modelSection.value = 'root'; }
 function setAccessPreset(value: 'request' | 'guarded' | 'full') { runtimeTouched.sandbox = true; runtimeTouched.approvalPolicy = true; if (value === 'full'&&props.defaults.allowDangerFullAccess) { sandbox.value = 'danger-full-access'; approvalPolicy.value = 'never'; } else if (value === 'guarded') { sandbox.value = 'workspace-write'; approvalPolicy.value = 'untrusted'; } else { sandbox.value = 'workspace-write'; approvalPolicy.value = 'on-request'; } menu.value = null; }
-function outside(event: PointerEvent) { if (root.value && !root.value.contains(event.target as Node)) menu.value = null; }
+function closeMenu() { menu.value = null; modelSection.value = 'root'; modelQuery.value = ''; }
+function outside(event: PointerEvent) { if (root.value && !root.value.contains(event.target as Node)) closeMenu(); }
 onMounted(() => document.addEventListener('pointerdown', outside));
 onBeforeUnmount(() => document.removeEventListener('pointerdown', outside));
 
@@ -155,7 +165,7 @@ function detectPicker() {
 
 function submit() {
   const value = text.value.trim();
-  if ((!value && !attachments.value.length && !selectedSkill.value && !mentions.value.length) || props.disabled) return;
+  if ((!value && !attachments.value.length && !selectedSkill.value && !mentions.value.length) || props.disabled || props.occupied) return;
   closePickers();
   const items: UserInput[] = [];
   // Mentions are sent as mention inputs
@@ -236,7 +246,7 @@ function slashDesc(cmd: SlashCommand) { return cmd.kind === 'skill' ? (cmd.item.
 
 <template>
   <footer class="composer-wrap">
-    <div v-if="menu || slashOpen || mentionOpen" class="composer-backdrop" @pointerdown="menu = null; closePickers()"></div>
+    <div v-if="menu || slashOpen || mentionOpen" class="composer-backdrop" @pointerdown="closeMenu(); closePickers()"></div>
     <div v-if="queued" class="queue-label">{{ queued }} 条消息{{ online ? '正在等待发送' : '已保存在此设备' }}</div>
     <div ref="root" class="composer-box composer-enhanced" :class="{ 'drag-active': dragOver }" @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop">
 
@@ -271,7 +281,7 @@ function slashDesc(cmd: SlashCommand) { return cmd.kind === 'skill' ? (cmd.item.
         <p v-if="!mentionQuery">输入 @ 后跟文件名搜索当前项目文件</p>
       </div>
 
-      <textarea ref="input" v-model="text" rows="1" :disabled="disabled" :placeholder="disabled ? '选择会话后输入' : '给 Codex 发送消息…  / 命令  @ 引用文件'" aria-label="消息" @keydown="keydown" @input="onInput" @paste="onPaste"></textarea>
+      <textarea ref="input" v-model="text" rows="1" :disabled="disabled" :placeholder="disabled ? '选择会话后输入' : occupied ? '正被本机 Codex 占用，等待回复结束后即可发送…' : '给 Codex 发送消息…  / 命令  @ 引用文件'" aria-label="消息" @keydown="keydown" @input="onInput" @paste="onPaste"></textarea>
       <input ref="fileInput" type="file" multiple hidden @change="files">
       <div class="composer-tools">
         <div class="composer-anchor composer-add-anchor">
@@ -285,9 +295,9 @@ function slashDesc(cmd: SlashCommand) { return cmd.kind === 'skill' ? (cmd.item.
         <div class="composer-spacer"></div>
         <div class="composer-anchor composer-model-anchor">
           <button class="runtime-pill" title="模型和推理强度" @click="toggle('model')"><strong>{{ selectedModel?.displayName || model || '模型' }}</strong><span>{{ effort }}</span></button>
-          <div v-if="menu === 'model'" class="composer-popover model-settings-popover acrylic-panel"><section v-if="modelSection === 'root'" class="model-settings-root"><button @click="modelSection = 'models'"><b>模型</b><span>{{ selectedModel?.displayName || model || '默认' }}</span><i>›</i></button><button class="selected" @click="modelSection = 'effort'"><b>推理强度</b><span>{{ effort }}</span><i>›</i></button><div class="model-settings-divider"></div></section><section v-else-if="modelSection === 'models'" class="model-choice-panel"><h3><button class="back-button" @click="modelSection = 'root'">‹</button>模型</h3><p v-if="capabilitiesLoading && !models.length">正在读取模型…</p><button v-if="defaults.model && !models.some(item => item.model === defaults.model)" :class="{ selected: model === defaults.model }" @click="chooseModel(defaults.model)"><span><b>{{ defaults.model }}</b><small>当前配置模型</small></span><i v-if="model === defaults.model">✓</i></button><button v-for="item in models" :key="item.id" :class="{ selected: model === item.model }" @click="chooseModel(item.model)"><span><b>{{ item.displayName }}</b><small>{{ item.description || item.model }}</small></span><i v-if="model === item.model">✓</i></button><p v-if="!capabilitiesLoading && !models.length">没有读取到可用模型</p></section><section v-else class="effort-choice-panel"><h3><button class="back-button" @click="modelSection = 'root'">‹</button>推理强度</h3><button v-for="item in effortOptions" :key="item" :class="{ selected: effort === item }" @click="chooseEffort(item)"><b>{{ item }}</b><i v-if="effort === item">✓</i></button></section></div>
+          <div v-if="menu === 'model'" class="composer-popover model-settings-popover acrylic-panel"><section v-if="modelSection === 'root'" class="model-settings-root"><button @click="openModelList"><b>模型</b><span>{{ selectedModel?.displayName || model || '默认' }}</span><i>›</i></button><button class="selected" @click="modelSection = 'effort'"><b>推理强度</b><span>{{ effort }}</span><i>›</i></button><div class="model-settings-divider"></div></section><section v-else-if="modelSection === 'models'" class="model-choice-panel"><h3><button class="back-button" @click="modelSection = 'root'">‹</button>模型</h3><label class="model-search"><span>⌕</span><input v-model="modelQuery" type="search" placeholder="搜索模型" aria-label="搜索模型"></label><p v-if="capabilitiesLoading && !models.length">正在读取模型…</p><button v-if="configuredModelVisible" :class="{ selected: model === defaults.model }" @click="chooseModel(defaults.model!)"><span><b>{{ defaults.model }}</b><small>当前配置模型</small></span><i v-if="model === defaults.model">✓</i></button><button v-for="item in filteredModels" :key="item.id" :class="{ selected: model === item.model }" @click="chooseModel(item.model)"><span><b>{{ item.displayName }}</b><small>{{ item.description || item.model }}</small></span><i v-if="model === item.model">✓</i></button><p v-if="!capabilitiesLoading && !models.length && !configuredModelVisible">没有读取到可用模型</p><p v-else-if="!capabilitiesLoading && !filteredModels.length && !configuredModelVisible">没有匹配的模型</p></section><section v-else class="effort-choice-panel"><h3><button class="back-button" @click="modelSection = 'root'">‹</button>推理强度</h3><button v-for="item in effortOptions" :key="item" :class="{ selected: effort === item }" @click="chooseEffort(item)"><b>{{ item }}</b><i v-if="effort === item">✓</i></button></section></div>
         </div>
-        <button v-if="activeTurn" class="stop-button" title="停止" @click="$emit('cancel')">■</button><button v-else class="send-button" title="发送" :disabled="disabled || (!text.trim() && !attachments.length && !selectedSkill && !mentions.length)" @click="submit">↑</button>
+        <button v-if="activeTurn" class="stop-button" :class="{ occupied: occupied }" :title="occupied ? '正被本机 Codex 占用' : '停止'" :disabled="occupied" @click="occupied ? undefined : $emit('cancel')">■</button><button v-else class="send-button" title="发送" :disabled="disabled || occupied || (!text.trim() && !attachments.length && !selectedSkill && !mentions.length)" @click="submit">↑</button>
       </div>
     </div>
   </footer>

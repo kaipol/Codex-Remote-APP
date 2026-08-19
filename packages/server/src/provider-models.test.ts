@@ -13,7 +13,7 @@ afterEach(async () => {
   root = '';
 });
 
-it('uses the selected catalog before a provider and otherwise requests /v1/models', async () => {
+it('uses only the provider /v1/models list when it responds', async () => {
   root = join(tmpdir(), 'codex-provider-models-' + Date.now() + '-' + Math.random());
   await mkdir(join(root, 'model-catalogs'), { recursive: true });
   const fetchMock = vi.fn().mockResolvedValue({
@@ -23,15 +23,8 @@ it('uses the selected catalog before a provider and otherwise requests /v1/model
   vi.stubGlobal('fetch', fetchMock);
   process.env.TEST_MODEL_TOKEN = 'token';
 
-  await writeFile(join(root, 'config.toml'), [
-    'model = "gpt-provider"',
-    'model_provider = "relay"',
-    '',
-    '[model_providers.relay]',
-    'base_url = "https://models.example/v1"',
-    'env_key = "TEST_MODEL_TOKEN"',
-  ].join('\n'));
-
+  // Built-in catalog entries must not leak into the picker when the provider
+  // successfully reports the models it actually serves.
   await writeFile(join(root, 'model-catalogs', 'selected.json'), JSON.stringify({ models: [{ slug: 'catalog-only' }] }));
   await writeFile(join(root, 'config.toml'), [
     'model_catalog_json = "selected.json"',
@@ -39,10 +32,16 @@ it('uses the selected catalog before a provider and otherwise requests /v1/model
     '',
     '[model_providers.relay]',
     'base_url = "https://models.example/v1"',
+    'env_key = "TEST_MODEL_TOKEN"',
   ].join('\n'));
-  await expect(discoverModels(root)).resolves.toEqual([expect.objectContaining({ model: 'catalog-only' })]);
-  expect(fetchMock).not.toHaveBeenCalled();
+  await expect(discoverModels(root)).resolves.toEqual([
+    expect.objectContaining({ model: 'gpt-provider' }),
+    expect.objectContaining({ model: 'gpt-secondary', displayName: 'Secondary' }),
+  ]);
+  expect(String(fetchMock.mock.calls[0][0])).toBe('https://models.example/v1/models');
+  expect(fetchMock.mock.calls[0][1]).toMatchObject({ headers: { authorization: 'Bearer token' } });
 
+  fetchMock.mockClear();
   await writeFile(join(root, 'config.toml'), [
     'model = "gpt-provider"',
     'model_provider = "relay"',
@@ -57,4 +56,23 @@ it('uses the selected catalog before a provider and otherwise requests /v1/model
   ]);
   expect(String(fetchMock.mock.calls[0][0])).toBe('https://models.example/v1/models');
   expect(fetchMock.mock.calls[0][1]).toMatchObject({ headers: { authorization: 'Bearer token' } });
+});
+
+it('returns no models when a configured provider list is empty', async () => {
+  root = join(tmpdir(), 'codex-provider-models-' + Date.now() + '-' + Math.random());
+  await mkdir(join(root, 'model-catalogs'), { recursive: true });
+  const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) });
+  vi.stubGlobal('fetch', fetchMock);
+  process.env.TEST_MODEL_TOKEN = 'token';
+
+  await writeFile(join(root, 'model-catalogs', 'selected.json'), JSON.stringify({ models: [{ slug: 'catalog-only' }] }));
+  await writeFile(join(root, 'config.toml'), [
+    'model_catalog_json = "selected.json"',
+    'model_provider = "relay"',
+    '',
+    '[model_providers.relay]',
+    'base_url = "https://models.example/v1"',
+    'env_key = "TEST_MODEL_TOKEN"',
+  ].join('\n'));
+  await expect(discoverModels(root)).resolves.toEqual([]);
 });

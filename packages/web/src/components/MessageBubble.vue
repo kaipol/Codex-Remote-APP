@@ -19,8 +19,9 @@ const props = defineProps<{
   message?: Message;
   messages?: Message[];
   segments?: Segment[];
-  state?: string;
-  editable?: boolean;
+   state?: string;
+   editable?: boolean;
+   pendingActionable?: boolean;
 }>();
 
 defineEmits<{ openDiff: [diff: string, title: string]; editPending: [message: Message] }>();
@@ -125,7 +126,7 @@ async function openReference(path: string | undefined) {
         </div>
         <div class="user-footer">
           <CopyButton class="user-copy" :text="renderMessages[0].content" label="复制回复"/>
-          <button v-if="renderMessages[0]?.content && (editable || (state && renderMessages[0]?.client_id))" class="message-edit" title="编辑后重新发送" aria-label="编辑后重新发送" @click="$emit('editPending', renderMessages[0])">✎</button>
+          <button v-if="renderMessages[0]?.content && (editable || pendingActionable)" class="message-edit" title="编辑后重新发送" aria-label="编辑后重新发送" @click="$emit('editPending', renderMessages[0])">✎</button>
           <small class="message-meta">{{ time(renderMessages[0].timestamp) }}<span v-if="state"> · {{ state }}</span></small>
         </div>
       </template>

@@ -9,6 +9,7 @@ import ConversationTimeline from'./components/ConversationTimeline.vue';
 import ReasoningPanel from'./components/ReasoningPanel.vue';
 import PairingSurface from'./components/PairingSurface.vue';
 import ConnectionBanner from'./components/ConnectionBanner.vue';
+import OutboxSheet from'./components/OutboxSheet.vue';
 const approval={request_id:'1:1',session_id:'s',kind:'item/commandExecution/requestApproval',payload:{command:'test'},status:'pending' as const,created_at:'x',updated_at:'x'};
 describe('pairing endpoint',()=>{
  it('emits the normalized input pair with its server address',async()=>{const wrapper=mount(PairingSurface,{props:{busy:false,error:'',initialServer:'http://192.168.1.2:8787'}});await wrapper.findAll('input')[1].setValue('123456');await wrapper.get('button.primary').trigger('click');expect(wrapper.emitted('pair')?.[0]).toEqual(['code','123456','http://192.168.1.2:8787'])});
@@ -41,6 +42,25 @@ describe('composer settings panels',()=>{
   expect(wrapper.find('.effort-choice-panel').exists()).toBe(true);
   expect(wrapper.find('.model-settings-root').exists()).toBe(false);
  });
+ it('filters models and keeps the selected model at the top',async()=>{
+  const models: ModelOption[]=[
+   {id:'m1',model:'model-one',displayName:'模型一',isDefault:true,supportedReasoningEfforts:['medium'],inputModalities:['text']},
+   {id:'m2',model:'model-two',displayName:'模型二',supportedReasoningEfforts:['medium'],inputModalities:['text']},
+   {id:'m3',model:'other-model',displayName:'其他模型',supportedReasoningEfforts:['medium'],inputModalities:['text']},
+  ];
+  const wrapper=mount(ComposerBox,{props:{...composerProps,models,defaults:{model:'model-one',effort:'medium'}}});
+  await wrapper.get('button.runtime-pill').trigger('click');
+  await wrapper.get('.model-settings-root > button').trigger('click');
+  await wrapper.findAll('.model-choice-panel > button').at(1)!.trigger('click');
+  await wrapper.get('button.runtime-pill').trigger('click');
+  await wrapper.get('button.runtime-pill').trigger('click');
+  await wrapper.get('.model-settings-root > button').trigger('click');
+  const choices=wrapper.findAll('.model-choice-panel > button');
+  expect(choices[0].text()).toContain('模型二');
+  await wrapper.get('.model-search input').setValue('other');
+  expect(wrapper.findAll('.model-choice-panel > button')).toHaveLength(1);
+  expect(wrapper.get('.model-choice-panel > button').text()).toContain('其他模型');
+ });
  it('preserves a manually selected model across capability refreshes',async()=>{
   const models: ModelOption[]=[
    {id:'m1',model:'model-one',displayName:'模型一',isDefault:true,supportedReasoningEfforts:['medium'],inputModalities:['text']},
@@ -61,6 +81,16 @@ describe('composer settings panels',()=>{
   document.body.dispatchEvent(new Event('pointerdown',{bubbles:true}));
   await wrapper.vm.$nextTick();
   expect(wrapper.find('.access-popover').exists()).toBe(false);
+  wrapper.unmount();
+ });
+ it('closes the model subpanel when clicking outside the composer',async()=>{
+  const wrapper=mount(ComposerBox,{props:composerProps,attachTo:document.body});
+  await wrapper.get('button.runtime-pill').trigger('click');
+  await wrapper.get('.model-settings-root > button').trigger('click');
+  expect(wrapper.find('.model-choice-panel').exists()).toBe(true);
+  document.body.dispatchEvent(new Event('pointerdown',{bubbles:true}));
+  await wrapper.vm.$nextTick();
+  expect(wrapper.find('.model-settings-popover').exists()).toBe(false);
   wrapper.unmount();
  });
 });
@@ -98,6 +128,19 @@ describe('session item presentation',()=>{
     expect(wrapper.text()).not.toContain('4');
     expect(wrapper.find('button.session-expand').exists()).toBe(false);
     expect(wrapper.get('button.session-item').attributes('title')).toBe('test');
+  });
+  it('closes the three-dot menu when clicking outside',async()=>{
+    const wrapper=mount(SessionItem,{props:{session:{session_id:'s1',title:'test',status:'active',pinned:false,cwd:'E:\\proj',created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z'},selected:false},attachTo:document.body});
+    await wrapper.get('button.session-more').trigger('click');
+    expect(wrapper.find('.session-menu').exists()).toBe(true);
+    await wrapper.get('button.session-item').trigger('pointerdown');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.session-menu').exists()).toBe(false);
+    await wrapper.get('button.session-more').trigger('click');
+    document.body.dispatchEvent(new Event('pointerdown',{bubbles:true}));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('.session-menu').exists()).toBe(false);
+    wrapper.unmount();
   });
 });
 
@@ -152,12 +195,13 @@ describe('message rendering controls',()=>{
 		  expect(wrapper.find('.reference-chip.skill svg').exists()).toBe(true);
 		  expect(wrapper.get('.reference-chip.skill').text()).toContain('Ai Slop Cleaner');
 		});
-			it('hides an explicitly interrupted turn',async()=>{
-		  const wrapper=mount(ConversationTimeline,{props:{messages:[{msg_id:'u1',turn_id:'t1',session_id:'s',role:'user',content:'cancelled prompt',timestamp:'2026-01-01T00:00:00Z',seq:1},{msg_id:'u2',turn_id:'t2',session_id:'s',role:'user',content:'kept prompt',timestamp:'2026-01-01T00:00:02Z',seq:3}],events:[{id:'e1',type:'turn_completed',session:'s',timestamp:'2026-01-01T00:00:01Z',seq:2,metadata:{turn_id:'t1',status:'interrupted'}}],loading:false,pendingStates:{},activeTurn:false}});
-		  await wrapper.vm.$nextTick();
-		  expect(wrapper.text()).not.toContain('cancelled prompt');
+			it('keeps an interrupted turn prompt but hides a rolled-back turn',async()=>{
+	  const wrapper=mount(ConversationTimeline,{props:{messages:[{msg_id:'u1',turn_id:'t1',session_id:'s',role:'user',content:'first prompt',timestamp:'2026-01-01T00:00:00Z',seq:1},{msg_id:'u2',turn_id:'t2',session_id:'s',role:'user',content:'rolled prompt',timestamp:'2026-01-01T00:00:02Z',seq:3},{msg_id:'u3',turn_id:'t3',session_id:'s',role:'user',content:'kept prompt',timestamp:'2026-01-01T00:00:04Z',seq:5}],events:[{id:'e1',type:'turn_failed',session:'s',timestamp:'2026-01-01T00:00:01Z',seq:2,metadata:{turn_id:'t1',status:'interrupted'}},{id:'e2',type:'turn_failed',session:'s',timestamp:'2026-01-01T00:00:03Z',seq:4,metadata:{turn_id:'t2',status:'rolled_back'}}],loading:false,pendingStates:{},activeTurn:false}});
+	  await wrapper.vm.$nextTick();
+	  expect(wrapper.text()).toContain('first prompt');
+	  expect(wrapper.text()).not.toContain('rolled prompt');
 	  expect(wrapper.text()).toContain('kept prompt');
-	 });
+ });
 		it('keeps an edit affordance on the latest sent user message',()=>{
 		  const wrapper=mount(ConversationTimeline,{props:{messages:[{msg_id:'u1',session_id:'s',role:'user',content:'latest prompt',timestamp:'2026-01-01T00:00:00Z',seq:1}],events:[],loading:false,pendingStates:{},activeTurn:false}});
 		  expect(wrapper.find('button.message-edit').exists()).toBe(true);
@@ -187,12 +231,15 @@ describe('message rendering controls',()=>{
 				  expect(wrapper.find('.assistant-turn-content').exists()).toBe(true);
 				  expect(wrapper.findAll('.event-card')).toHaveLength(1);
 				 });
-				it('shows an occupied state instead of the empty home when the session is externally occupied',()=>{
-			  const wrapper=mount(ConversationTimeline,{props:{messages:[],events:[],loading:false,pendingStates:{},activeTurn:true,occupied:true}});
-			  expect(wrapper.find('.timeline-state.empty').exists()).toBe(false);
-			  expect(wrapper.find('.timeline-state.occupied').exists()).toBe(true);
+				it('shows an occupied notice but keeps the history and the live stream visible while occupied',()=>{
+			  const wrapper=mount(ConversationTimeline,{props:{messages:[{msg_id:'u1',session_id:'s',role:'user',content:'hi',timestamp:'2026-08-19T00:00:00Z',seq:1}],events:[],loading:false,pendingStates:{},activeTurn:true,occupied:true}});
+			  // Read-only notice banner, NOT a full-screen blocking state.
 			  expect(wrapper.find('.occupied-notice').exists()).toBe(true);
-			  expect(wrapper.find('.timeline-state.occupied').text()).toContain('会话被本机占用');
+			  expect(wrapper.find('.occupied-notice').text()).toContain('此会话正被本机 Codex 写入');
+			  expect(wrapper.find('.timeline-state.occupied').exists()).toBe(false);
+			  // History and live stream stay mounted: the user row renders, the typing indicator shows, and pending/streamed turns are not replaced by a stale snapshot.
+			  expect(wrapper.find('[data-user-id="u1"]').exists()).toBe(true);
+			  expect(wrapper.findComponent({name:'TypingIndicator'}).exists()).toBe(true);
 			});
 			it('keeps the empty home state when not occupied',()=>{
 			  const wrapper=mount(ConversationTimeline,{props:{messages:[],events:[],loading:false,pendingStates:{},activeTurn:false,occupied:false}});
@@ -256,4 +303,30 @@ describe('connection banner offline states',()=>{
     expect(wrapper.text()).toContain('离线模式');
     expect(wrapper.text()).not.toContain('服务器离线');
   });
+  it('keeps the queue entry available while offline',async()=>{
+    const wrapper=mount(ConnectionBanner,{props:{online:false,ws:'offline',appServer:'ready',pending:2,serverOffline:false}});
+    expect(wrapper.text()).toContain('2 条消息');
+    await wrapper.get('button.connection-outbox').trigger('click');
+    expect(wrapper.emitted('openOutbox')).toHaveLength(1);
+  });
+});
+
+describe('outbox sheet',()=>{
+ const session={session_id:'s1',title:'项目对话',status:'active' as const,pinned:false,cwd:'C:\\project',created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z'};
+ const queued={id:'q1',session_id:'s1',content:'请检查发送队列',created_at:'2026-01-01T00:01:00Z',status:'waiting' as const};
+ it('shows content and owning conversation and emits navigation/cancel actions',async()=>{
+  const wrapper=mount(OutboxSheet,{props:{open:true,items:[queued],sessions:[session]}});
+  expect(wrapper.text()).toContain('请检查发送队列');
+  expect(wrapper.text()).toContain('项目对话');
+  await wrapper.get('button.text-button').trigger('click');
+  expect(wrapper.find('.outbox-content').text()).toContain('请检查发送队列');
+  await wrapper.findAll('button.outbox-link')[0].trigger('click');
+  expect(wrapper.emitted('openConversation')?.[0]).toEqual([queued]);
+  await wrapper.find('button.danger-text').trigger('click');
+  expect(wrapper.emitted('cancel')?.[0]).toEqual([queued]);
+ });
+ it('hides cancellation for an item already being submitted',()=>{
+  const wrapper=mount(OutboxSheet,{props:{open:true,items:[{...queued,status:'sending'}],sessions:[session]}});
+  expect(wrapper.find('button.danger-text').exists()).toBe(false);
+ });
 });

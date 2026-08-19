@@ -138,6 +138,10 @@
 .model-settings-divider { display: none !important; }
 .model-settings-root > .advanced-row { grid-template-columns: minmax(0, 1fr) auto !important; color: var(--muted); }
 .model-choice-panel h3, .effort-choice-panel h3 { position: static; display: flex; align-items: center; gap: 5px; padding: 5px 4px 8px !important; }
+.model-search { display: flex; align-items: center; gap: 7px; margin: 0 4px 6px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); }
+.model-search:focus-within { border-color: var(--accent); background: var(--panel); }
+.model-search span { font-size: 15px; line-height: 1; }
+.model-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; font-size: 12px; }
 .back-button { width: 32px !important; height: 32px; padding: 0 !important; border: 0; border-radius: 7px; background: transparent; font-size: 26px; text-align: center !important; }
 .model-choice-panel > button > span { display: flex; min-width: 0; flex-direction: column; }
 .model-choice-panel small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
@@ -1105,4 +1109,64 @@ label > .password-toggle:hover { background: var(--surface-strong); color: var(-
   .conversation { padding-inline: 12px !important; }
   .composer-wrap { padding-inline: 12px !important; }
   .composer-chips { padding-inline: 11px !important; }
+}
+
+.connection-outbox {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.connection-outbox:hover { color: var(--text); }
+.outbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: flex-end;
+  background: #17181688;
+  backdrop-filter: blur(3px);
+}
+.outbox-sheet {
+  width: min(620px, 100vw);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.outbox-sheet > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+.outbox-sheet header small { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.outbox-sheet h2 { margin: 3px 0 0; font-size: 19px; }
+.outbox-empty { display: grid; flex: 1; place-items: center; padding: 24px; color: var(--muted); }
+.outbox-list { flex: 1; overflow: auto; padding: 14px 20px 24px; }
+.outbox-item { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.outbox-item:first-child { padding-top: 2px; }
+.outbox-item-head, .outbox-conversation, .outbox-item footer { display: flex; align-items: center; gap: 9px; }
+.outbox-item-head { justify-content: space-between; color: var(--faint); font-size: 10px; }
+.outbox-status { padding: 3px 7px; border-radius: 999px; background: var(--surface-strong); color: var(--muted); }
+.outbox-status.pending, .outbox-status.waiting { background: var(--warning-soft); color: var(--warning); }
+.outbox-status.sending { background: var(--accent-soft); color: var(--accent); }
+.outbox-status.failed, .outbox-status.quarantined { background: var(--danger-soft); color: var(--danger); }
+.outbox-conversation { margin-top: 10px; min-width: 0; }
+.outbox-conversation small { flex: none; color: var(--muted); font-size: 11px; }
+.outbox-link { min-width: 0; overflow: hidden; border: 0; padding: 0; background: transparent; color: var(--text); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.outbox-link:not(:disabled):hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.outbox-preview { display: -webkit-box; overflow: hidden; margin: 9px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.outbox-content { overflow: auto; max-height: 220px; margin: 10px 0 0; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--surface); font: 12px/1.5 "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.outbox-item footer { justify-content: flex-end; margin-top: 8px; }
+.outbox-item footer .text-button { padding: 5px 7px; font-size: 11px; }
+.danger-text { color: var(--danger); }
+@media (max-width: 700px) {
+  .outbox-sheet > header { padding-top: calc(16px + env(safe-area-inset-top)); }
+  .outbox-list { padding-inline: 14px; }
 }

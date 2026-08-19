@@ -64,7 +64,64 @@ describe('Codex user prompt cleanup',()=>{
   });
 });
 
+  it('strips the model-switch warning prefix and keeps the real user request',async()=>{
+    const sessionsDir=join(tmpdir(),'codex-sessions-'+crypto.randomUUID());const path=join(sessionsDir,'rollout-modelwarn.jsonl');
+    const entry=(timestamp:string,type:string,payload:unknown)=>({timestamp,type,payload});
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,[entry('2026-08-19T00:00:00.000Z','session_meta',{id:'thread-warn',cwd:'C:/workspace',timestamp:'2026-08-19T00:00:00.000Z'}),entry('2026-08-19T00:00:01.000Z','event_msg',{type:'user_message',message:'\u26a0This session was recorded with model `gpt-5.6-terra` but is resuming with `deepseek/deepseek-v4-pro`. Consider switching back to `gpt-5.6-terra` as it may affect Codex performance.\n'}),entry('2026-08-19T00:00:02.000Z','event_msg',{type:'user_message',message:'\u26a0This session was recorded with model `gpt-5.6-terra` but is resuming with `deepseek/deepseek-v4-pro`. Consider switching back to `gpt-5.6-terra` as it may affect Codex performance.\n现在在ai输出的开头或者结尾会出现这种警告，请不要显示'})].map(e=>JSON.stringify(e)).join(String.fromCharCode(10)));
+    try{
+      const messages=await readRolloutMessages(path,'thread-warn');
+      expect(messages.map(message=>message.content)).toEqual(['现在在ai输出的开头或者结尾会出现这种警告，请不要显示']);
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
+  it('strips multi-line reconnect and backend warning notices',async()=>{
+    const sessionsDir=join(tmpdir(),'codex-sessions-'+crypto.randomUUID());const path=join(sessionsDir,'rollout-reconnect.jsonl');
+    const nl=String.fromCharCode(10);
+    const entry=(timestamp:string,type:string,payload:unknown)=>({timestamp,type,payload});
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,[entry('2026-08-19T00:00:00.000Z','session_meta',{id:'thread-rc',cwd:'C:/workspace',timestamp:'2026-08-19T00:00:00.000Z'}),entry('2026-08-19T00:00:01.000Z','event_msg',{type:'user_message',message:['\u26a0Reconnecting... 1/5','\u26a0Reconnecting... 2/5','\u26a0unexpected status 502 Bad Gateway: Unknown error, url: http://127.0.0.1:57321/v1/responses','\u26a0Model metadata for `z-ai/glm-5.2` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.'].join(nl)}),entry('2026-08-19T00:00:02.000Z','response_item',{type:'message',role:'assistant',content:[{type:'output_text',text:['\u26a0Model metadata for `z-ai/glm-5.2` not found before my reply.','这是真实回复内容，包含\u26a0以校验保留。'].join(nl)}]})].map(e=>JSON.stringify(e)).join(nl));
+    try{
+      const messages=await readRolloutMessages(path,'thread-rc');
+      expect(messages.filter(m=>m.role==='user').map(m=>m.content)).toEqual([]);
+      const assistant=messages.find(m=>m.role==='assistant');
+      expect(assistant?.content.trim()).toBe('这是真实回复内容，包含\u26a0以校验保留。');
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
 describe('Codex session discovery',()=>{
+  it('caches the rollout scan within the TTL window to avoid rescanning on every call',async()=>{
+    const sessionsDir=join(tmpdir(),`codex-sessions-${crypto.randomUUID()}`);
+    const path=join(sessionsDir,'rollout-cache.jsonl');
+    const rollout=(id:string)=>JSON.stringify({timestamp:'2026-08-14T00:00:00.000Z',type:'session_meta',payload:{id,cwd:'C:\\\\workspace',timestamp:'2026-08-14T00:00:00.000Z'}});
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,rollout('cache-session'));
+    try{
+      const catalog=new CodexSessionCatalog(sessionsDir);
+      await catalog.refresh();
+      // Delete the rollout — a forced refresh would no longer find it, but
+      // a TTL-cached refresh() returns the stale entry without touching disk.
+      await rm(path,{force:true});
+      const sessions=await catalog.refresh();
+      expect(sessions.map(s=>s.session_id)).toEqual(['cache-session']);
+      // force=true bypasses the cache and actually rescans the directory.
+      const forced=await catalog.refresh(true);
+      expect(forced.map(s=>s.session_id)).toEqual([]);
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
+  it('deduplicates concurrent refresh calls into a single disk scan',async()=>{
+    const sessionsDir=join(tmpdir(),`codex-sessions-${crypto.randomUUID()}`);
+    const path=join(sessionsDir,'rollout-dedup.jsonl');
+    const rollout=(id:string)=>JSON.stringify({timestamp:'2026-08-14T00:00:00.000Z',type:'session_meta',payload:{id,cwd:'C:\\\\workspace',timestamp:'2026-08-14T00:00:00.000Z'}});
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,rollout('dedup-session'));
+    try{
+      const catalog=new CodexSessionCatalog(sessionsDir);
+      const [a,b,c]=await Promise.all([catalog.refresh(),catalog.refresh(),catalog.refresh()]);
+      // All three calls receive the same result — only one disk scan happened.
+      expect(a).toBe(b);
+      expect(b).toBe(c);
+      expect(a.map(s=>s.session_id)).toEqual(['dedup-session']);
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
   it('excludes rollouts kept in .codex-session-delete',async()=>{
     const sessionsDir=join(tmpdir(),`codex-sessions-${crypto.randomUUID()}`);
     const visible=join(sessionsDir,'2026','08','14','rollout-visible.jsonl');
@@ -228,6 +285,52 @@ describe('Codex session discovery',()=>{
         ['reasoning_status','2026-08-14T00:00:01.000Z',2],
         ['turn_completed','2026-08-14T00:00:02.000Z',3],
       ]);
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
+  it('filters Task Handoff Summary and Context Compaction Summary from visible messages',async()=>{
+    const sessionsDir=join(tmpdir(),'codex-sessions-'+crypto.randomUUID());const path=join(sessionsDir,'rollout-handoff.jsonl');
+    const entry=(timestamp:string,type:string,payload:unknown)=>({timestamp,type,payload});
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,[entry('2026-08-19T00:00:00.000Z','session_meta',{id:'thread-handoff',cwd:'C:/workspace',timestamp:'2026-08-19T00:00:00.000Z'}),entry('2026-08-19T00:00:01.000Z','response_item',{type:'message',role:'assistant',content:[{type:'output_text',text:'正常回复'}]}),entry('2026-08-19T00:00:02.000Z','response_item',{type:'message',role:'assistant',content:[{type:'output_text',text:'## Task Handoff Summary 更多任务'}]}),entry('2026-08-19T00:00:03.000Z','response_item',{type:'message',role:'assistant',content:[{type:'output_text',text:'### Context Compaction Summary 摘要'}]})].map(e=>JSON.stringify(e)).join(String.fromCharCode(10)));
+    try{
+      const messages=await readRolloutMessages(path,'thread-handoff');
+      expect(messages.map(message=>message.content)).toEqual(['正常回复']);
+      const events=await readRolloutEvents(path,'thread-handoff');
+      expect(events.filter(event=>event.type==='context_compaction')).toHaveLength(2);
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
+  it('drops a rolled-back turn user message and emits turn_failed(rolled_back)',async()=>{
+    const sessionsDir=join(tmpdir(),'codex-sessions-'+crypto.randomUUID());const path=join(sessionsDir,'rollout-rollback.jsonl');
+    const entry=(timestamp:string,type:string,payload:unknown)=>({timestamp,type,payload});
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,[entry('2026-08-19T00:00:00.000Z','event_msg',{type:'task_started',turn_id:'turn-a'}),entry('2026-08-19T00:00:00.500Z','event_msg',{type:'user_message',message:'继续'}),entry('2026-08-19T00:00:01.000Z','event_msg',{type:'task_complete',turn_id:'turn-a'}),entry('2026-08-19T00:00:02.000Z','event_msg',{type:'thread_rolled_back'})].map(e=>JSON.stringify(e)).join(String.fromCharCode(10)));
+    try{
+      const [messages,events]=await Promise.all([readRolloutMessages(path,'thread-1'),readRolloutEvents(path,'thread-1')]);
+      expect(messages.map(message=>message.content)).toEqual([]);
+      expect(events.filter(event=>event.type==='turn_failed'&&event.metadata?.status==='rolled_back')).toHaveLength(1);
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
+  it('keeps an interrupted turn prompt and drops a rolled-back turn duplicate',async()=>{
+    const sessionsDir=join(tmpdir(),'codex-sessions-'+crypto.randomUUID());const path=join(sessionsDir,'rollout-rollback-dedup.jsonl');
+    const entry=(timestamp:string,type:string,payload:unknown)=>({timestamp,type,payload});
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,[entry('2026-08-19T00:00:00.000Z','event_msg',{type:'task_started',turn_id:'turn-a'}),entry('2026-08-19T00:00:00.500Z','event_msg',{type:'user_message',message:'继续'}),entry('2026-08-19T00:00:01.000Z','event_msg',{type:'turn_aborted',turn_id:'turn-a',reason:'interrupted'}),entry('2026-08-19T00:00:02.000Z','event_msg',{type:'task_started',turn_id:'turn-b'}),entry('2026-08-19T00:00:02.500Z','event_msg',{type:'user_message',message:'继续'}),entry('2026-08-19T00:00:03.000Z','event_msg',{type:'task_complete',turn_id:'turn-b'}),entry('2026-08-19T00:00:04.000Z','event_msg',{type:'thread_rolled_back'})].map(e=>JSON.stringify(e)).join(String.fromCharCode(10)));
+    try{
+      const messages=await readRolloutMessages(path,'thread-1');
+      expect(messages.map(message=>message.content)).toEqual(['继续']);
+    }finally{await rm(sessionsDir,{recursive:true,force:true})}
+  });
+  it('upgrades an aborted-then-rolled-back turn to rolled_back',async()=>{
+    const sessionsDir=join(tmpdir(),'codex-sessions-'+crypto.randomUUID());const path=join(sessionsDir,'rollout-aborted-rollback.jsonl');
+    const entry=(timestamp:string,type:string,payload:unknown)=>({timestamp,type,payload});
+    await mkdir(sessionsDir,{recursive:true});
+    await writeFile(path,[entry('2026-08-19T00:00:00.000Z','event_msg',{type:'task_started',turn_id:'turn-a'}),entry('2026-08-19T00:00:00.500Z','event_msg',{type:'user_message',message:'继续'}),entry('2026-08-19T00:00:01.000Z','event_msg',{type:'turn_aborted',turn_id:'turn-a',reason:'interrupted'}),entry('2026-08-19T00:00:02.000Z','event_msg',{type:'thread_rolled_back'})].map(e=>JSON.stringify(e)).join(String.fromCharCode(10)));
+    try{
+      const [messages,events]=await Promise.all([readRolloutMessages(path,'thread-1'),readRolloutEvents(path,'thread-1')]);
+      expect(messages.map(message=>message.content)).toEqual([]);
+      const failed=events.filter(event=>event.type==='turn_failed'&&event.metadata?.turn_id==='turn-a');
+      expect(failed).toHaveLength(1);
+      expect(failed[0].metadata?.status).toBe('rolled_back');
     }finally{await rm(sessionsDir,{recursive:true,force:true})}
   });
 });

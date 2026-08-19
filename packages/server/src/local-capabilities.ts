@@ -2,17 +2,20 @@ import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
 import type { AppOption, ModelOption, ReasoningEffort, SkillOption } from '@remote/shared';
 
+export async function discoverProviderModels(codexHome:string):Promise<ModelOption[]|undefined>{
+  const source=await configSource(codexHome);
+  return fetchProviderModels(source,tomlString(source,'model'));
+}
 export async function discoverModels(codexHome:string):Promise<ModelOption[]>{
   const source=await configSource(codexHome);
+  const providerModels=await discoverProviderModels(codexHome);
+  if(providerModels)return providerModels;
   const defaultModel=tomlString(source,'model');
   const configured=source?configuredCatalogPath(source,codexHome):undefined;
   const cacheCandidates=[join(codexHome,'models_cache.json'),join(codexHome,'cc-switch-model-catalog.json')];
-  // Codex Desktop appends visible built-in/cache entries after a configured
-  // provider catalog. Keep the selected catalog order, then add cache-only
-  // models so the remote picker matches the desktop picker as catalogs refresh.
+  // Local catalogs/caches are only used when no provider endpoint is
+  // configured; the manager treats /v1/models as an allowlist when one is.
   if(configured){const [selected,cached]=await Promise.all([readModelCatalogs([configured],defaultModel),readModelCatalogs(cacheCandidates,defaultModel)]);if(selected.length)return mergeModels(selected,cached)}
-  const providerModels=await fetchProviderModels(source,defaultModel);
-  if(providerModels.length)return mergeModels(providerModels,await readModelCatalogs(cacheCandidates,defaultModel));
   return readModelCatalogs([...cacheCandidates,join(codexHome,'model-catalogs','default.json')],defaultModel);
 }
 async function readModelCatalogs(candidates:string[],defaultModel?:string):Promise<ModelOption[]>{
@@ -54,8 +57,8 @@ function providerSettings(source:string){
   return {baseUrl,environmentKey};
 }
 function escapeRegExp(value:string){return value.replace(/[.*+?^${}()|[\\]\\]/g,'\\$&')}
-async function fetchProviderModels(source:string,defaultModel?:string):Promise<ModelOption[]>{
-  const {baseUrl:base,environmentKey}=providerSettings(source);if(!base)return [];
+async function fetchProviderModels(source:string,defaultModel?:string):Promise<ModelOption[]|undefined>{
+  const {baseUrl:base,environmentKey}=providerSettings(source);if(!base)return undefined;
   try{
     const target=new URL('models',base.endsWith('/')?base:base+'/');
    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);

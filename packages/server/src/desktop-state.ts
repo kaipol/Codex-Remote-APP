@@ -23,14 +23,17 @@ export class DesktopStateReader {
   private codexHome: string;
   private statePath: string;
   private dbPath: string;
+  private locksDir: string;
   private cache: { data: DesktopState; mtime: number } | null = null;
   private tombstoneCache: { ids: Set<string>; mtime: number } | null = null;
+  private lockCache: { ids: Set<string>; mtime: number } | null = null;
   private dbThreadCache: { threads: Array<{ id: string; cwd: string | null; title: string | null; name: string | null; archived: number; created_at_ms: number | null; updated_at_ms: number | null; recency_at_ms: number | null }>; mtime: number } | null = null;
 
   constructor(codexHome: string) {
     this.codexHome = codexHome;
     this.statePath = join(codexHome, '.codex-global-state.json');
     this.dbPath = join(codexHome, 'state_5.sqlite');
+    this.locksDir = join(codexHome, 'thread-writer-locks');
   }
 
   /**
@@ -57,6 +60,37 @@ export class DesktopStateReader {
       return ids;
     } catch {
       this.tombstoneCache = null;
+      return new Set();
+    }
+  }
+
+  /**
+   * Returns the set of thread IDs that currently have a writer lock file in
+   * `~/.codex/thread-writer-locks/`. Codex Desktop creates a per-thread lock
+   * file when a conversation is opened and removes it when the tab is closed;
+   * the local app-server likewise acquires a lock while running a turn. The
+   * lock is exclusive, so a present file means someone is the active writer
+   * for that thread. Callers must combine this with the bridge's own active
+   * turns (see CodexManager.activeTurnThreadIds) to decide "externally
+   * occupied" — a thread locked by our own in-flight turn is not occupied.
+   */
+  async getLockedThreadIds(): Promise<Set<string>> {
+    try {
+      const st = await stat(this.locksDir);
+      const mtime = st.mtimeMs;
+      if (this.lockCache && this.lockCache.mtime === mtime) return this.lockCache.ids;
+      const files = await readdir(this.locksDir);
+      const ids = new Set<string>();
+      for (const file of files) {
+        if (!file.endsWith('.lock')) continue;
+        // .coordination.lock is a shared coordination sentinel, not a per-thread lock.
+        if (file === '.coordination.lock') continue;
+        ids.add(file.slice(0, -'.lock'.length));
+      }
+      this.lockCache = { ids, mtime };
+      return ids;
+    } catch {
+      this.lockCache = null;
       return new Set();
     }
   }

@@ -4,8 +4,12 @@ export function normalizeMessageContent(value: string): string {
   return value.replace(/\r\n?/g, '\n').trim();
 }
 
+export function stripNoticeLines(value: string): string {
+  return value.replace(/\r\n?/g, '\n').replace(/^\u26a0\ufe0f?[^\n]*\n?/gim, '');
+}
+
 export function sanitizeUserContent(value: string): string {
-  return normalizeMessageContent(value)
+  return stripNoticeLines(value)
     .replace(/<subagent_notification>[\s\S]*?<\/subagent_notification>/gi, '')
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, '')
     .replace(/<recommended_plugins>[\s\S]*?<\/recommended_plugins>/gi, '')

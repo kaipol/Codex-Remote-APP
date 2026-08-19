@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { BridgeEvent,EventType } from '@remote/shared';
+import { isSuppressedRuntimeNotice, type BridgeEvent, type EventType } from '@remote/shared';
 import { record,text } from './protocol.js';
 import { parseUserInput,cleanConversationText } from '../codex-sessions.js';
 export interface RoutedEvent extends Omit<BridgeEvent,'seq'>{}
@@ -15,6 +15,9 @@ export function routeNotification(method:string,params:unknown):RoutedEvent|unde
  else if(method.includes('compaction'))type='context_compaction';
  else if(method==='error'||method==='warning'||method==='configWarning'){type='provider_error';const err=p.error??p.message;if(typeof err==='string')content=err;else if(err&&typeof err==='object'){const er=record(err);content=String(er.message??er.text??er.detail??JSON.stringify(er).slice(0,500))}else content=String(p.error??p.message??'')}
  if(!type)return undefined;
+ if(content!==undefined)content=cleanConversationText(content,type==='user_message'?'user':'assistant');
+ if(type==='provider_error'&&content&&isSuppressedRuntimeNotice(content))return undefined;
+ if(['assistant_delta','assistant_message','reasoning_status','provider_error'].includes(type)&&!content?.trim())return undefined;
  if(type==='user_message'&&!content?.trim()&&!(Array.isArray(metadata.references)&&metadata.references.length))return undefined;
  return {id:randomUUID(),type,session:thread,timestamp:new Date().toISOString(),content,metadata}
 }

@@ -28,3 +28,36 @@ describe('Codex Desktop sidebar registration',()=>{
     }finally{await rm(root,{recursive:true,force:true})}
   });
 });
+
+describe('Codex Desktop writer-lock occupancy',()=>{
+  it('reads locked thread IDs from thread-writer-locks, excluding the coordination lock',async()=>{
+    const root=join(tmpdir(),`codex-locks-${crypto.randomUUID()}`);
+    const locksDir=join(root,'thread-writer-locks');
+    await mkdir(locksDir,{recursive:true});
+    await writeFile(join(locksDir,'01aa-open.lock'),'');
+    await writeFile(join(locksDir,'01bb-idle.lock'),'');
+    await writeFile(join(locksDir,'.coordination.lock'),'');
+    try{
+      const reader=new DesktopStateReader(root);
+      const ids=await reader.getLockedThreadIds();
+      expect(ids.size).toBe(2);
+      expect(ids.has('01aa-open')).toBe(true);
+      expect(ids.has('01bb-idle')).toBe(true);
+      expect(ids.has('.coordination')).toBe(false);
+      const second=await reader.getLockedThreadIds();
+      expect(second).toBe(ids);
+      await rm(join(locksDir,'01aa-open.lock'),{force:true});
+      const after=await reader.getLockedThreadIds();
+      expect(after.has('01aa-open')).toBe(false);
+      expect(after.has('01bb-idle')).toBe(true);
+    }finally{await rm(root,{recursive:true,force:true})}
+  });
+  it('returns an empty set when the locks directory does not exist',async()=>{
+    const root=join(tmpdir(),`codex-nolocks-${crypto.randomUUID()}`);
+    try{
+      const reader=new DesktopStateReader(root);
+      const ids=await reader.getLockedThreadIds();
+      expect(ids.size).toBe(0);
+    }finally{await rm(root,{recursive:true,force:true})}
+  });
+});

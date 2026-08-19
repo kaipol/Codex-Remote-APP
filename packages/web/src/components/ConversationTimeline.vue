@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import type { BridgeEvent, Message } from '@remote/shared';
+import { isSuppressedRuntimeNotice, type BridgeEvent, type Message } from '@remote/shared';
 import MessageBubble from './MessageBubble.vue';
 import ReasoningPanel from './ReasoningPanel.vue';
 import CompactionBanner from './CompactionBanner.vue';
@@ -12,6 +12,7 @@ const p = defineProps<{
   events: BridgeEvent[];
   loading: boolean;
   pendingStates: Record<string, string>;
+  pendingCancellable?: Record<string, boolean>;
   activeTurn: boolean;
   occupied?: boolean;
   jumpTarget?: { id: string; key: number } | null;
@@ -79,7 +80,13 @@ const timeline = computed<TurnItem[]>(() => {
   const hiddenTurns = new Set(
     p.events
       .filter(e => e.type === 'turn_completed' || e.type === 'turn_failed')
-      .filter(e => ['interrupted', 'cancelled', 'canceled', 'aborted', 'rolled_back'].includes(String(e.metadata?.status || '').toLowerCase()))
+      // Only a *rolled back* turn is erased: its duplicate user message and
+      // partial reply must be hidden. Interrupted/aborted/cancelled turns were
+      // stopped, not undone — the user message was genuinely sent and is part
+      // of the history, so the desktop app keeps it. Hiding those here
+      // disappeared the first real prompt (which lives in an interrupted turn)
+      // and dropped the "继续" retries.
+      .filter(e => ['rolled_back'].includes(String(e.metadata?.status || '').toLowerCase()))
       .map(e => String(e.metadata?.turn_id || ''))
       .filter(Boolean)
   );
@@ -87,6 +94,7 @@ const timeline = computed<TurnItem[]>(() => {
   const visibleEvents = coalesceToolEvents(p.events
     .filter(e => !hiddenEventTypes.has(e.type))
     .filter(e => !noiseEventTypes.has(e.type))
+    .filter(e => !(e.type === 'provider_error' && (!e.content || isSuppressedRuntimeNotice(e.content))))
     .filter(e => !String(e.metadata?.turn_id || '') || !hiddenTurns.has(String(e.metadata?.turn_id))),finishedTurns);
 
   // Sort everything by timestamp + seq, keeping tools interleaved with messages
@@ -278,28 +286,25 @@ watch(jumpOpen, open => { if (!open) hideUserPreview(); });
       <div v-if="p.occupied" class="occupied-notice" role="status">
         <span class="occupied-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10" opacity="0.25" />
-            <path d="M12 2a10 10 0 0 1 10 10" style="transform-origin: center; animation: reasoning-spin 0.8s linear infinite;" />
+            <rect x="5" y="11" width="14" height="10" rx="2" />
+            <path d="M8 11V7a4 4 0 0 1 8 0v4" />
           </svg>
         </span>
-        <span class="occupied-text">此会话正被本机 Codex 占用，等待当前回复结束后即可发送。</span>
+        <span class="occupied-text">此会话正被本机 Codex 写入，历史可查看，发送已禁用；等待回复结束后即可发送。</span>
       </div>
       <div v-if="loading" class="timeline-state"><span class="spinner"></span>正在读取会话…</div>
-      <div v-else-if="!timeline.length && !p.occupied" class="timeline-state empty">
+      <div v-else-if="!timeline.length" class="timeline-state empty">
         <img class="empty-mark" src="/icon.svg" alt="">
         <h2>从这里开始</h2>
         <p>向 Codex 描述你的任务。历史和实时事件会保留在此处。</p>
-      </div>
-      <div v-else-if="!timeline.length && p.occupied" class="timeline-state occupied">
-        <h2>会话被本机占用</h2>
-        <p>此会话正被本机 Codex 使用。等待当前回复结束后即可发送新消息。</p>
       </div>
       <template v-for="(item, index) in timeline" :key="index">
         <div v-if="item.kind === 'user'" :data-user-index="index" :data-user-id="item.message.msg_id">
           <MessageBubble
             :message="item.message"
             :state="item.state"
-            :editable="isLatestUser(item, index)"
+            :editable="isLatestUser(item, index) && !item.state"
+            :pending-actionable="Boolean(item.message.client_id && p.pendingCancellable?.[item.message.client_id])"
             @edit-pending="message => $emit('editPending', message)"
           />
         </div>

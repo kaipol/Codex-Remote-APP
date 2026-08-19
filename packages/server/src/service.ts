@@ -1,6 +1,6 @@
-import type { AppOption, BridgeEvent, FileSearchResult, RuntimeConfig, Session, SessionDetail, SessionStatus, SkillOption, UserInput } from '@remote/shared';
+import { isSuppressedRuntimeNotice, type AppOption, type BridgeEvent, type FileSearchResult, type RuntimeConfig, type Session, type SessionDetail, type SessionStatus, type SkillOption, type UserInput } from '@remote/shared';
 import { spawn } from 'node:child_process';
-import { readFile, realpath } from 'node:fs/promises';
+import { open, readFile, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Config } from './config.js';
 import type { Store } from './db.js';
@@ -9,6 +9,41 @@ import { CodexManager } from './codex/manager.js';
 import { RpcTimeoutError,RpcUnavailableError } from './codex/json-rpc-client.js';
 import { text, type CodexThread } from './codex/protocol.js';
 import { DesktopStateReader } from './desktop-state.js';
+
+/**
+ * Standalone helper (also used by SessionService) — inspects the tail of a
+ * Codex rollout file to decide whether an AI reply is being actively written.
+ * Codex appends one JSON record per line; the final record of a finished turn
+ * is an `event_msg` whose payload `type` is `task_complete` (or `turn_*` /
+ * `thread_*` lifecycle metadata for freshly seeded threads). Any other final
+ * record (function_call, agent message, task_started, item/*, reasoning,
+ * agent delta, …) indicates an in-flight reply, i.e. the file is still being
+ * appended — the thread should be treated as "occupied".
+ *
+ * Exported so it can be unit-tested in isolation.
+ */
+export async function rolloutActivelyWriting(rolloutPath:string, sampleBytes=4096):Promise<boolean>{
+  try{
+    const handle=await open(rolloutPath,'r');
+    try{
+      const {size}=await handle.stat();
+      const length=Math.min(sampleBytes,size);
+      if(length===0)return false;
+      const buffer=Buffer.alloc(length);
+      await handle.read(buffer,0,length,Math.max(0,size-length));
+      const text=buffer.toString('utf8');
+      const lines=text.split(/\r?\n/).filter(Boolean);
+      const last=lines[lines.length-1];
+      if(!last)return false;
+      let record:any;
+      try{record=JSON.parse(last)}catch{return false}
+      const type=String(record?.payload?.type||record?.type||'').toLowerCase();
+      if(type==='task_complete'||type==='turn_completed'||type==='turn_failed'||type==='thread_settings_applied')return false;
+      if(type.startsWith('thread_')||type.startsWith('session_'))return false;
+      return true;
+    }finally{await handle.close()}
+  }catch{return false}
+}
 
 export class SessionService {
   readonly catalog: CodexSessionCatalog;
@@ -71,11 +106,18 @@ export class SessionService {
     return (await this.desktopState.getThreadCwdHints()).get(id);
   }
   private rememberSessionAccess(id:string,allowed:boolean){this.sessionAccess.set(id,allowed);return allowed}
+  /**
+   * Inspects the tail of a Codex rollout file to decide whether an AI reply is
+   * still being written; delegates to the standalone rolloutActivelyWriting()
+   * helper (also unit-tested). See that helper for the record-type rules.
+   */
+  private async isActivelyWriting(rolloutPath:string, sampleBytes=4096):Promise<boolean>{return rolloutActivelyWriting(rolloutPath,sampleBytes)}
   async canAccessSession(id:string,cwdHint?:string,forceRefresh=false):Promise<boolean>{
     if(cwdHint!==undefined)return this.rememberSessionAccess(id,await this.isAllowedPath(cwdHint));
     const cached=this.sessionAccess.get(id);if(!forceRefresh&&cached!==undefined)return cached;
     const existing=this.sessionAccessChecks.get(id);if(existing)return existing;
-    const pending=(async()=>{try{const thread=await this.manager.read(id,false);const cwd=await this.effectiveCwd(id,thread.cwd);return this.rememberSessionAccess(id,await this.isAllowedPath(cwd))}catch{await this.catalog.refresh();const detail=await this.catalog.detail(id);const cwd=await this.effectiveCwd(id,detail?.cwd);return this.rememberSessionAccess(id,Boolean(detail&&cwd&&await this.isAllowedPath(cwd)))}})().finally(()=>this.sessionAccessChecks.delete(id));
+    const pending=(async()=>{try{const thread=await this.manager.read(id,false);const cwd=await this.effectiveCwd(id,thread.cwd);return this.rememberSessionAccess(id,await this.isAllowedPath(cwd))}catch{// A caller asked for a re-check (forceRefresh=true) — bypass the catalog's 5s mtime/throttle cache so a rollout rewritten seconds ago (a thread whose cwd moved in/out of scope) is actually re-scanned; without it the stale cwd grants or denies the old path.
+      await this.catalog.refresh(forceRefresh);const detail=await this.catalog.detail(id);const cwd=await this.effectiveCwd(id,detail?.cwd);return this.rememberSessionAccess(id,Boolean(detail&&cwd&&await this.isAllowedPath(cwd)))}})().finally(()=>this.sessionAccessChecks.delete(id));
     this.sessionAccessChecks.set(id,pending);return pending;
   }
   async canAccessEvent(event:{session:string;type?:string;metadata?:Record<string,unknown>}){
@@ -89,8 +131,8 @@ export class SessionService {
     return this.canAccessSession(event.session,cwd,cwd===undefined);
   }
   private async requireAllowedSession(id:string){if(!await this.canAccessSession(id,undefined,true))throw Object.assign(new Error('session not found'),{status:404})}
-  async list(): Promise<Session[]> {
-    const rollouts = await this.catalog.refresh();
+  async list(force = false): Promise<Session[]> {
+    const rollouts = await this.catalog.refresh(force);
     let active: Session[] = [];
     try { active = (await this.manager.list(false)).map(thread => this.fromThread(thread)); } catch { /* durable rollout fallback */ }
     const merged = new Map<string,Session>(rollouts.map(item => [item.session_id, item]));
@@ -146,16 +188,27 @@ export class SessionService {
 	   const visible=this.merge(enrichedWithGhosts).filter(session => session.status !== 'archived' && !deletedIds.has(session.session_id));
     for(const id of deletedIds)this.sessionAccess.set(id,false);
     const roots=await this.canonicalRoots(false);
+    // A thread is "occupied" when another Codex process (the local Desktop) is
+    // actively writing an AI reply: its writer lock file is present AND the
+    // rollout's last record is not a turn-completion event AND the lock is not
+    // held by this bridge's own in-flight turn. A merely-open-but-idle Desktop
+    // tab keeps its lock file but ends its rollout with `task_complete`; those
+    // threads stay viewable (history renders) and only sending is deferred.
+    const lockedIds = await this.desktopState.getLockedThreadIds();
+    const ourActive = this.manager.activeTurnThreadIds();
     const allowed:Session[]=[];
     for(const session of visible){
       let ok=false;
       if(session.cwd){try{ok=this.pathAllowed(await realpath(resolve(this.normalizeCwd(session.cwd))),roots)}catch{ok=false}}
       this.rememberSessionAccess(session.session_id,ok);
-      if(ok)allowed.push(session);
+      if(!ok)continue;
+      const externallyLocked=lockedIds.has(session.session_id)&&!ourActive.has(session.session_id);
+      const writing=externallyLocked&&session.rollout_path?await this.isActivelyWriting(session.rollout_path):false;
+      allowed.push({...session,...(writing?{occupied:true}:{})});
     }
 	   return allowed;
   }
-  async refresh(): Promise<Session[]> { return this.list(); }
+  async refresh(): Promise<Session[]> { return this.list(true); }
   async create(cwd: string,runtime:RuntimeConfig={}): Promise<Session> {
     const allowedCwd=await this.requireAllowedPath(cwd);
     const created = this.fromThread(await this.manager.start(allowedCwd,runtime));
@@ -177,23 +230,38 @@ export class SessionService {
       ]);
       const cwd = await this.effectiveCwd(id, thread?.cwd ?? rollout?.cwd);
       if (!cwd || !this.rememberSessionAccess(id, await this.isAllowedPath(cwd))) return undefined;
+      const externallyLocked = (await this.desktopState.getLockedThreadIds()).has(id) && !this.manager.activeTurnThreadIds().has(id);
+      const occupied = externallyLocked && rollout?.rollout_path ? await this.isActivelyWriting(rollout.rollout_path) : false;
       if (rollout) {
         const session = this.applyOverlay({ ...rollout, cwd });
         const threadMessages = thread ? threadHistoryMessages(id, thread, session.updated_at) : [];
-        const threadEvents = thread ? threadHistoryEvents(id, thread, session.updated_at) : [];
+        // The rollout is the authoritative event history: it carries every
+        // tool call, reasoning, command, file change, and compaction marker at
+        // its real timeline position. The app-server thread snapshot reuses the
+        // same activity but mints synthetic timestamps clustered at the thread's
+        // updated_at, so merging it reordered those items after the final
+        // message (trailing "编辑文件"/"上下文已压缩" labels). Drop the thread
+        // activity here; live store events (real timestamps) and
+        // reconcileTurnLifecycle (turn status) still fill active-session gaps.
         return {
           ...session,
+            ...(occupied?{occupied:true}:{}),
           messages: mergeHistoryMessages(rollout.messages, threadMessages),
-          events: withCompletedTurnEvents(thread, mergeEvents(rollout.events, [...threadEvents, ...this.store.eventsForSession(id)])),
+          events: reconcileTurnLifecycle(thread, mergeEvents(rollout.events, this.store.eventsForSession(id)), this.manager.activeTurnIds()),
         };
       }
       if (thread) {
         this.store.ensureSession(thread);
         const session = this.applyOverlay(this.fromThread(thread));
         if (cwd) session.cwd = cwd;
+        // The rollout file is missing; fall back to the app-server thread's
+        // own rollout_path (if present) to judge active writing. Without a
+        // rollout we cannot prove the AI is busy, so a merely-open Desktop tab
+        // stays viewable rather than being conservatively blocked.
+        const threadOccupied = externallyLocked && thread.path ? await this.isActivelyWriting(thread.path) : false;
         const messages = threadHistoryMessages(id, thread, session.updated_at);
         const historyEvents = threadHistoryEvents(id, thread, session.updated_at);
-        return { ...session, messages, events: withCompletedTurnEvents(thread, mergeEvents(historyEvents, this.store.eventsForSession(id))) };
+        return { ...session, ...(threadOccupied?{occupied:true}:{}), messages, events: reconcileTurnLifecycle(thread, mergeEvents(historyEvents, this.store.eventsForSession(id)), this.manager.activeTurnIds()) };
       }
       return undefined;
   }
@@ -239,7 +307,7 @@ export class SessionService {
       child.once('spawn',()=>{child.unref();resolve()});
     });
   }
-  async sync(cursor:number,clientStreamId?:string){const latest=this.store.latestCursor();const reset=Boolean(clientStreamId&&clientStreamId!==this.store.streamId)||(!clientStreamId&&cursor>0)||cursor>latest;const start=reset?0:cursor;const page=this.store.eventsAfter(start);const events=[];for(const event of page)if(await this.canAccessEvent(event))events.push(event);const next=page.at(-1)?.seq??start;return {cursor:next,events,stream_id:this.store.streamId,...(reset?{reset:true}:{}),has_more:next<latest}}
+  async sync(cursor:number,clientStreamId?:string){const latest=this.store.latestCursor();const reset=Boolean(clientStreamId&&clientStreamId!==this.store.streamId)||(!clientStreamId&&cursor>0)||cursor>latest;const start=reset?0:cursor;const page=this.store.eventsAfter(start);const events=[];for(const event of page)if(await this.canAccessEvent(event)){const clean=cleanBridgeEvent(event);if(clean)events.push(clean)}const next=page.at(-1)?.seq??start;return {cursor:next,events,stream_id:this.store.streamId,...(reset?{reset:true}:{}),has_more:next<latest}}
 	 async projects(){const projects=await this.desktopState.getProjectsAsync();const visibleProjects=[] as typeof projects;for(const project of projects){const roots=(await Promise.all(project.rootPaths.map(async root=>await this.isAllowedPath(root)?root:undefined))).filter((root):root is string=>Boolean(root));if(roots.length)visibleProjects.push({...project,rootPaths:roots})}const allowedIds=new Set((await this.list()).map(session=>session.session_id));const sidebarOrderMap=await this.desktopState.getSidebarThreadOrder();const sidebarOrder=Object.fromEntries([...sidebarOrderMap].map(([key,ids])=>[key,ids.filter(id=>allowedIds.has(id))]));const allowedProjects=new Set(visibleProjects.map(project=>project.id));const projectOrder=(await this.desktopState.getProjectOrder()).filter(id=>allowedProjects.has(id));return {projects:visibleProjects,sidebarOrder,projectOrder}}
   async approvals(sessionId?:string){if(sessionId)await this.requireAllowedSession(sessionId);const approvals=this.store.listApprovals(sessionId);if(sessionId)return approvals.map(publicApproval);const allowed=await Promise.all(approvals.map(async approval=>await this.canAccessSession(approval.session_id)?approval:undefined));return allowed.filter((approval):approval is NonNullable<typeof approval>=>Boolean(approval)).map(publicApproval)}
 	 async approval(id:string){const approval=this.store.getApproval(id);if(!approval)return undefined;await this.requireAllowedSession(approval.session_id);return publicApproval(approval)}
@@ -325,7 +393,9 @@ function eventHistoryKey(event:any):string {
 }
 function mergeEvents(primary:any[],extra:any[]){
   const map=new Map<string,any>();
-  for(const event of [...primary,...extra]){
+  for(const rawEvent of [...primary,...extra]){
+    const event=cleanBridgeEvent(rawEvent);
+    if(!event)continue;
     const key=eventHistoryKey(event);
     const existing=map.get(key);
     if(!existing){map.set(key,event);continue}
@@ -333,21 +403,45 @@ function mergeEvents(primary:any[],extra:any[]){
   }
   return [...map.values()].sort((a,b)=>a.timestamp.localeCompare(b.timestamp)||a.seq-b.seq||a.id.localeCompare(b.id));
 }
-function isContextSummary(textValue:string){return /^\s*#{1,3}\s*(?:Handoff Summary|Context (?:Summary|Compaction)|当前进度|进度摘要|交接摘要|上下文摘要)(?:\s|$)/i.test(textValue)||/Another language model started to solve this problem/i.test(textValue)}
-function withCompletedTurnEvents(thread:CodexThread|undefined, events:BridgeEvent[]):BridgeEvent[]{
+function cleanBridgeEvent(event:any):any|undefined {
+  if(typeof event?.content!=='string')return event;
+  if(event.type==='provider_error'&&isSuppressedRuntimeNotice(event.content))return undefined;
+  const content=cleanConversationText(event.content,'assistant');
+  if(event.type==='provider_error'&&!content.trim())return undefined;
+  if((event.type==='assistant_delta'||event.type==='assistant_message'||event.type==='reasoning_status')&&!content.trim())return undefined;
+  return {...event,content};
+}
+function isContextSummary(textValue:string){return /^\s*#{0,3}\s*(?:Task Handoff Summary|Handoff Summary|Context (?:Summary|Compaction(?: Summary)?)|当前进度|进度摘要|交接摘要|上下文摘要)(?:\s|$)/i.test(textValue)||/Another language model started to solve this problem/i.test(textValue)}
+function reconcileTurnLifecycle(thread:CodexThread|undefined, events:BridgeEvent[], ourActiveTurnIds:Set<string>=new Set()):BridgeEvent[]{
   if(!thread?.turns?.length)return events;
   const finishedTurns=new Map<string,'completed'|'failed'>();
+  const activeTurnIds=new Set<string>();
   for(const turn of thread.turns){
     const status=String(turn.status||'').toLowerCase();
     if(isFinishedTurnStatus(status))finishedTurns.set(turn.id,status==='failed'||status==='error'?'failed':'completed');
+    else if(isActiveTurnStatus(status))activeTurnIds.add(turn.id);
   }
-  if(!finishedTurns.size)return events;
+  if(!finishedTurns.size&&!activeTurnIds.size)return events;
   const terminated=new Set<string>();
+  const started=new Set<string>();
   for(const event of events){
     if((event.type==='turn_completed'||event.type==='turn_failed')&&typeof event.metadata?.turn_id==='string')terminated.add(event.metadata.turn_id);
+    if(event.type==='turn_started'&&typeof event.metadata?.turn_id==='string')started.add(event.metadata.turn_id);
   }
   const maxSeq=events.reduce((value,event)=>Math.max(value,Number(event.seq)||0),0);
   const additions:BridgeEvent[]=[];
+  // Inject turn_started ONLY for active turns this bridge itself is running
+  // (manager.active has them). For turns started by another process (e.g. the
+  // local Codex Desktop, or a wedged/in-progress turn left in state_5.sqlite),
+  // we must NOT mint a synthetic turn_started: the bridge's app-server will
+  // never emit a matching turn_completed for them, so the web client would
+  // show a stuck "Codex is working" state that never clears. Desktop-only
+  // occupancy is surfaced through the server-side `occupied` flag instead.
+  for(const turnId of activeTurnIds){
+    if(started.has(turnId))continue;
+    if(!ourActiveTurnIds.has(turnId))continue;
+    additions.push({id:`history:${turnId}:active:${maxSeq+additions.length+1}`,type:'turn_started',session:events[0]?.session||thread.id,timestamp:new Date().toISOString(),seq:maxSeq+additions.length+1,metadata:{turn_id:turnId,status:'started',source:'thread-status-reconciliation'}});
+  }
   for(const [turnId,status] of finishedTurns){
     if(terminated.has(turnId))continue;
     additions.push({id:`history:${turnId}:${status}:${maxSeq+additions.length+1}`,type:status==='failed'?'turn_failed':'turn_completed',session:events[0]?.session||thread.id,timestamp:new Date().toISOString(),seq:maxSeq+additions.length+1,metadata:{turn_id:turnId,status,source:'thread-status-reconciliation'}});
@@ -355,3 +449,4 @@ function withCompletedTurnEvents(thread:CodexThread|undefined, events:BridgeEven
   return [...events,...additions];
 }
 function isFinishedTurnStatus(status:string){return status==='completed'||status==='succeeded'||status==='done'||status==='failed'||status==='error'||status==='cancelled'||status==='canceled'||status==='aborted'||status==='interrupted'}
+function isActiveTurnStatus(status:string){return status==='inprogress'||status==='active'||status==='started'||status==='running'}

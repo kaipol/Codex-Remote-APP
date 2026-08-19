@@ -25,4 +25,15 @@ describe('notification routing', () => {
 	    const event=routeNotification('item/completed',{threadId:'thread-1',turnId:'turn-1',item:{id:'reasoning-1',type:'reasoning',summary:[{type:'summary_text',text:'检查历史内容'}]}});
 	    expect(event).toMatchObject({type:'reasoning_status',content:'检查历史内容'});
 	  });
+
+  it('drops warning-only provider errors',()=>{
+    expect(routeNotification('error',{threadId:'thread-1',message:'⚠Model metadata for `z-ai/glm-5.2` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.'})).toBeUndefined();
+    expect(routeNotification('error',{threadId:'thread-1',message:'Model metadata for `glm-5.3` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.'})).toBeUndefined();
+    expect(routeNotification('error',{threadId:'thread-1',message:'unexpected status 502 Bad Gateway: Unknown error, url: http://127.0.0.1:57321/v1/responses'})).toBeUndefined();
+  });
+
+  it('strips warning lines from live assistant messages',()=>{
+    const event=routeNotification('item/completed',{threadId:'thread-1',turnId:'turn-1',item:{id:'message-1',type:'agentMessage',text:'⚠unexpected status 502 Bad Gateway\n实际回复'}});
+    expect(event).toMatchObject({type:'assistant_message',content:'实际回复'});
+  });
 });
