@@ -35,9 +35,12 @@ export type ApprovalPolicy='untrusted'|'on-failure'|'on-request'|'never';
 export type SandboxMode='read-only'|'workspace-write'|'danger-full-access';
 
 export function isSuppressedRuntimeNotice(value:string):boolean{
-  const lines=value.replace(/\r\n?/g,'\n').split('\n').map(line=>line.replace(/^\s*\u26a0\ufe0f?\s*/,'').trim()).filter(Boolean);
+  const rawLines=value.replace(/\r\n?/g,'\n').split('\n').map(line=>line.trim()).filter(Boolean);
+  if(!rawLines.length)return true;
+  const warningOnly=rawLines.every(line=>/^\u26a0\ufe0f?\s*/.test(line));
+  const lines=rawLines.map(line=>line.replace(/^\u26a0\ufe0f?\s*/,'').trim());
   if(!lines.length)return true;
-  return lines.every(line=>/^Reconnecting\.\.\.\s*\d+\/\d+$/i.test(line)
+  return warningOnly||lines.every(line=>/^Reconnecting\.\.\.\s*\d+\/\d+$/i.test(line)
     ||/^unexpected status\s+\d{3}\s+Bad Gateway\b/i.test(line)
     ||/^Model metadata for .+ not found\. Defaulting to fallback metadata; this can degrade performance and cause issues\.?$/i.test(line));
 }

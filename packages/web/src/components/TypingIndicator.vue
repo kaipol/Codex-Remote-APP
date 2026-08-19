@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import type { BridgeEvent } from '@remote/shared';
+import { isSuppressedRuntimeNotice, type BridgeEvent } from '@remote/shared';
 
 const props = defineProps<{
   activeTurn: boolean;
@@ -55,7 +55,7 @@ const providerError = computed<string | undefined>(() => {
   const reversed = [...props.events].reverse();
   for (const e of reversed) {
     if (e.type === 'turn_started') break;
-    if (e.type === 'provider_error' && e.content) return e.content;
+    if (e.type === 'provider_error' && e.content && !isSuppressedRuntimeNotice(e.content)) return e.content;
   }
   return undefined;
 });
