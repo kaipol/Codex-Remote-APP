@@ -1,0 +1,26 @@
+// Offline build mirror for Gradle (Android).
+// Injects a local file:// Maven repo built from the on-disk Gradle cache so
+// dependency resolution works with no network (sandbox/firewall blocks repos).
+//
+// Prereq: regenerate the mirror once with build-gradle-mirror.ps1:
+//   pwsh -NoProfile -File android/build-gradle-mirror.ps1
+//
+// Then build offline, passing this as an init script:
+//   <gradle> assembleDebug --offline --console=plain --init-script android/offline-mirror.init.gradle
+//
+// The mirror path below is absolute to this machine's repo location; update it
+// if the repo moves. The mirror directory (.gradle-mirror) is gitignored.
+def mirror = 'file:///E:/Codex%20Remote%20APP/.gradle-mirror'
+
+settingsEvaluated { settings ->
+    settings.pluginManagement {
+        repositories { maven { url mirror } }
+    }
+}
+
+allprojects {
+    buildscript {
+        repositories { maven { url mirror } }
+    }
+    repositories { maven { url mirror } }
+}
