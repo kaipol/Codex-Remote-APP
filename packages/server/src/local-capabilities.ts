@@ -8,15 +8,20 @@ export async function discoverProviderModels(codexHome:string):Promise<ModelOpti
 }
 export async function discoverModels(codexHome:string):Promise<ModelOption[]>{
   const source=await configSource(codexHome);
-  const providerModels=await discoverProviderModels(codexHome);
-  if(providerModels)return providerModels;
   const defaultModel=tomlString(source,'model');
   const configured=source?configuredCatalogPath(source,codexHome):undefined;
   const cacheCandidates=[join(codexHome,'models_cache.json'),join(codexHome,'cc-switch-model-catalog.json')];
-  // Local catalogs/caches are only used when no provider endpoint is
-  // configured; the manager treats /v1/models as an allowlist when one is.
-  if(configured){const [selected,cached]=await Promise.all([readModelCatalogs([configured],defaultModel),readModelCatalogs(cacheCandidates,defaultModel)]);if(selected.length)return mergeModels(selected,cached)}
-  return readModelCatalogs([...cacheCandidates,join(codexHome,'model-catalogs','default.json')],defaultModel);
+  const [providerModels,selected,cached]=await Promise.all([
+    discoverProviderModels(codexHome),
+    configured?readModelCatalogs([configured],defaultModel):Promise.resolve([]),
+    readModelCatalogs([...cacheCandidates,join(codexHome,'model-catalogs','default.json')],defaultModel),
+  ]);
+  // Provider discovery is best-effort: local/custom relays can be temporarily
+  // unavailable while the configured catalog still describes valid models.
+  // Keep the richer selected-catalog metadata first and use generic caches
+  // only when no selected catalog is available. Provider discovery can add
+  // models, but a stale global cache must not flood a configured picker.
+  return mergeModels(selected.length?selected:cached,providerModels??[]);
 }
 async function readModelCatalogs(candidates:string[],defaultModel?:string):Promise<ModelOption[]>{
   const models=new Map<string,ModelOption>();

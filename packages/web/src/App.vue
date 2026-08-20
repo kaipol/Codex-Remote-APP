@@ -2,7 +2,7 @@
 import {computed,onBeforeUnmount,onMounted,ref,watch} from 'vue';
 import type {AppOption,ApprovalDecision,BridgeEvent,CodexDefaults,Message,ModelOption,PendingApproval,ProjectInfo,RuntimeConfig,Session,SkillOption,UserInput} from '@remote/shared';
 import {ApiError,api,clearAuth,configureServerUrl,connect,currentServerUrl,ensureAuth,ensureFreshToken,hasAuth,onAuthLost,onTokenRefreshed,pair,pairWithPassword} from './api';
-import {cacheEvents,cacheMessages,cacheSessions,clearLocalState,cursor,db,setCursor,setStreamId,streamId,type Pending} from './db';
+import {cacheEvents,cacheMessages,cacheSessions,clearLocalState,clearTransportState,cursor,db,setCursor,setStreamId,streamId,hasOfflineCache,getMeta,type Pending} from './db';
 import {deriveActiveTurn,deriveActiveTurnId,mergeBridgeEvent,projectBridgeEvents} from './composables/eventProjection';
 import {DeferredSendError,isPendingCancellable,mergePendingMessages,pendingToMessage,replayInSessionOrder} from './composables/outbox';
 import {drainSync} from './composables/sync';
@@ -18,8 +18,11 @@ import OutboxSheet from './components/OutboxSheet.vue';
 import SessionSidebar from './components/SessionSidebar.vue';
 import SettingsSurface from './components/SettingsSurface.vue';
 import ThreadHeader from './components/ThreadHeader.vue';
+import OfflineUnlockSurface from './components/OfflineUnlockSurface.vue';
+import {offlinePasswordIsValid,hasOfflinePassword,verifyOfflinePassword,setOfflinePassword,clearOfflinePassword} from './composables/offlineAccess';
 
 const paired=ref(false),pairBusy=ref(false),error=ref(''),sessions=ref<Session[]>([]),active=ref<Session|null>(null),messages=ref<Message[]>([]),events=ref<BridgeEvent[]>([]),approvals=ref<PendingApproval[]>([]),approvalBusy=ref(''),online=ref(navigator.onLine),wsState=ref<'connected'|'connecting'|'offline'>('offline'),appServer=ref<'ready'|'error'>('ready'),serverOffline=ref(false),drawer=ref(false),sidebarHidden=ref(localStorage.getItem('sidebar-hidden')==='true'),creatingThread=ref(false),loadingSessions=ref(false),loadingThread=ref(false),transitioning=ref(false),activeTurn=ref(false),sending=ref(false),pending=ref<Pending[]>([]),settingsOpen=ref(false),approvalOpen=ref(false),diffOpen=ref(false),diff=ref(''),diffTitle=ref(''),theme=ref(localStorage.getItem('theme')||'system'),models=ref<ModelOption[]>([]),skills=ref<SkillOption[]>([]),apps=ref<AppOption[]>([]),defaults=ref<CodexDefaults>({}),capabilitiesLoading=ref(false),allowedCwds=ref<string[]>([]),projectList=ref<ProjectInfo[]>([]),sidebarOrder=ref<Record<string,string[]>>({}),projectOrder=ref<string[]>([]),jumpTarget=ref<{id:string;key:number}|null>(null);
+const offlineMode=ref(false),offlineUnlockOpen=ref(false),offlineBusy=ref(false),offlineError=ref(''),hasCache=ref(false),offlineHasPassword=ref(false),serverBack=ref(false);let offlineProbeTimer:number|undefined;
 const draftCwd=ref(''),newThreadOpen=ref(false),createError=ref(''),initialServer=ref(currentServerUrl()),editingPending=ref<Pending|null>(null),editingSent=ref<Message|null>(null),pendingEditorText=ref(''),lastRuntime=ref<RuntimeConfig>({}),outboxOpen=ref(false);let ws:WebSocket|null=null,retryTimer:number|undefined,keepaliveTimer:number|undefined,sessionRefreshTimer:number|undefined,capabilityRefreshTimer:number|undefined,occupiedCheckTimer:number|undefined,sessionPollTimer:number|undefined,manualClose=false,capabilityReloadQueued=false;
 let retryCount=0;
 let wsGeneration=0;
@@ -40,14 +43,14 @@ watch(active,session=>{clearInterval(occupiedCheckTimer);occupiedCheckTimer=unde
 function updateSession(updated:Session){const index=sessions.value.findIndex(item=>item.session_id===updated.session_id);if(index>=0)sessions.value[index]=updated;else sessions.value.unshift(updated);active.value=active.value?.session_id===updated.session_id?updated:active.value;db.sessions.put(updated).catch(error=>console.warn('[remote:db] session cache write failed',error))}
 function applyTheme(value:string){theme.value=value;localStorage.setItem('theme',value);document.documentElement.dataset.theme=value}
 function toggleSidebar(){sidebarHidden.value=!sidebarHidden.value;localStorage.setItem('sidebar-hidden',String(sidebarHidden.value))}
-async function doPair(mode:'code'|'password',value:string,serverUrl:string){pairBusy.value=true;error.value='';try{initialServer.value=configureServerUrl(serverUrl);await(mode==='password'?pairWithPassword(value):pair(value));await clearLocalState();paired.value=true;await boot()}catch(e){error.value=e instanceof Error?e.message:'配对失败'}finally{pairBusy.value=false}}
-async function loadSessions(refresh=false){loadingSessions.value=true;error.value='';
+async function doPair(mode:'code'|'password',value:string,serverUrl:string){pairBusy.value=true;error.value='';try{initialServer.value=configureServerUrl(serverUrl);await(mode==='password'?pairWithPassword(value):pair(value));await clearTransportState();paired.value=true;await boot()}catch(e){error.value=e instanceof Error?e.message:'配对失败'}finally{pairBusy.value=false}}
+async function loadSessions(refresh=false){if(offlineMode.value){try{sessions.value=await db.sessions.orderBy('updated_at').reverse().toArray()}catch{sessions.value=[]};return}loadingSessions.value=true;error.value='';
   // Cache-first: show cached sessions from IndexedDB immediately so the
   // sidebar isn't empty during the (potentially slow) server scan. The
   // authoritative list replaces this once the API responds.
   if(!sessions.value.length&&!refresh){try{const cached=await db.sessions.orderBy('updated_at').reverse().toArray();if(cached.length)sessions.value=cached}catch(cacheError){console.warn('[remote:db] sessions precache read failed',cacheError)}}
   try{const list=refresh?await api.refreshSessions():await api.sessions();sessions.value=list;await cacheSessions(list);appServer.value='ready';serverOffline.value=false;if(active.value&&active.value.session_id!=='draft'&&!list.some(item=>item.session_id===active.value?.session_id)){selectionGeneration++;active.value=null;messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false}}catch(e){try{sessions.value=await db.sessions.orderBy('updated_at').reverse().toArray()}catch(cacheError){console.warn('[remote:db] sessions fallback read failed',cacheError);sessions.value=[]}if(e instanceof ApiError){error.value=e.message||'无法读取会话';appServer.value='error'}else serverOffline.value=true}finally{loadingSessions.value=false}if(!active.value&&sessions.value[0])await select(sessions.value[0])}
-function createThread(){startDraft(active.value?.cwd||allowedCwds.value[0]||'')}
+function createThread(){if(offlineMode.value)return;startDraft(active.value?.cwd||allowedCwds.value[0]||'')}
 function createInCwd(cwd:string){startDraft(allowedCwds.value.includes(cwd)?cwd:allowedCwds.value[0]||cwd)}
 function openManualCreate(){createError.value='';newThreadOpen.value=true}
 async function confirmCreate(cwd:string){creatingThread.value=true;createError.value='';error.value='';try{const created=await api.create(allowedCwds.value.includes(cwd)?cwd:allowedCwds.value[0]||cwd||'.');updateSession(created);newThreadOpen.value=false;await select(created)}catch(e){createError.value=e instanceof Error?e.message:'创建失败';newThreadOpen.value=true}finally{creatingThread.value=false}}
@@ -58,9 +61,9 @@ function startDraft(cwd:string){
   active.value={session_id:'draft',title:'新会话',status:'active',pinned:false,cwd:effectiveCwd,created_at:new Date().toISOString(),updated_at:new Date().toISOString()};
   messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false;drawer.value=false;loadingThread.value=false;void loadCapabilities();
 }
-async function rename(){if(!active.value)return;const title=prompt('会话名称',active.value.title)?.trim();if(title)updateSession(await api.update(active.value.session_id,{title}))}
-async function pin(session:Session){try{updateSession(await api.update(session.session_id,{pinned:!session.pinned}));sessions.value.sort((a,b)=>Number(b.pinned)-Number(a.pinned)||b.updated_at.localeCompare(a.updated_at))}catch(e){error.value=e instanceof Error?e.message:'置顶失败'}}
-async function archive(session:Session){try{const status=session.status==='archived'?'active':'archived';updateSession(await api.update(session.session_id,{status}));if(active.value?.session_id===session.session_id&&status==='archived')active.value=null}catch(e){error.value=e instanceof Error?e.message:'归档失败'}}
+async function rename(){if(offlineMode.value||!active.value)return;const title=prompt('会话名称',active.value.title)?.trim();if(title)updateSession(await api.update(active.value.session_id,{title}))}
+async function pin(session:Session){if(offlineMode.value)return;try{updateSession(await api.update(session.session_id,{pinned:!session.pinned}));sessions.value.sort((a,b)=>Number(b.pinned)-Number(a.pinned)||b.updated_at.localeCompare(a.updated_at))}catch(e){error.value=e instanceof Error?e.message:'置顶失败'}}
+async function archive(session:Session){if(offlineMode.value)return;try{const status=session.status==='archived'?'active':'archived';updateSession(await api.update(session.session_id,{status}));if(active.value?.session_id===session.session_id&&status==='archived')active.value=null}catch(e){error.value=e instanceof Error?e.message:'归档失败'}}
 async function renameSession(session:Session){active.value=session;await rename()}
 async function loadCapabilities(){
   if(!active.value)return;
@@ -95,7 +98,9 @@ async function resetSyncState(){
       // it quarantined until the user explicitly confirms a retry.
       await db.pending.toCollection().modify(item=>{if(item.status!=='sent'){item.status='quarantined';item.error='服务器同步状态已重置，请确认后重试'}});
       await db.pending.where('status').equals('sent').delete();
-      await db.meta.clear();
+      // Preserve local-only credentials (offline access password) in meta; only
+      // the transport cursor/stream_id track a resettable server stream.
+      await db.meta.delete('cursor');await db.meta.delete('stream_id');
     });
   }catch(error){console.warn('[remote:db] sync reset failed',error)}
   try{pending.value=await db.pending.toArray()}catch(error){console.warn('[remote:db] pending read after reset failed',error);pending.value=[]}
@@ -286,7 +291,7 @@ onTokenRefreshed(()=>{
   }
 });
 
-async function queueMessage(payload:{text:string;input:UserInput[];runtime:RuntimeConfig}){if(!active.value)return;
+async function queueMessage(payload:{text:string;input:UserInput[];runtime:RuntimeConfig}){if(offlineMode.value||!active.value)return;
   lastRuntime.value=payload.runtime;
   let sessionId=active.value.session_id;let cwd=active.value.cwd;
   if(sessionId==='draft'){creatingThread.value=true;error.value='';try{const created=await api.create(draftCwd.value||cwd||'.');sessionId=created.session_id;updateSession(created);active.value=created;draftCwd.value='';await loadCapabilities()}catch(e){error.value=e instanceof Error?e.message:'创建失败';creatingThread.value=false;return}finally{creatingThread.value=false}}
@@ -342,11 +347,12 @@ function openDiff(value:string,title:string){diff.value=value;diffTitle.value=ti
 function refreshCapabilitiesOnFocus(){if(paired.value&&online.value&&document.visibilityState==='visible')void loadCapabilities()}
 function network(){online.value=navigator.onLine;if(online.value){openWs();void loadCapabilities()}else{wsState.value='offline';clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);ws?.close()}}
 async function boot(){try{await db.transaction('rw',db.pending,async()=>{await db.pending.where('status').equals('sending').modify(item=>{item.status='pending'})})}catch(error){console.warn('[remote:db] pending startup cleanup failed',error)}try{pending.value=await db.pending.toArray()}catch(error){console.warn('[remote:db] pending read failed',error);pending.value=[]}try{allowedCwds.value=await api.cwdRoots()}catch{allowedCwds.value=[]};try{const proj=await api.projects();projectList.value=proj.projects;sidebarOrder.value=proj.sidebarOrder;projectOrder.value=proj.projectOrder}catch{projectList.value=[];sidebarOrder.value={};projectOrder.value=[]};await loadSessions();await loadCapabilities();clearInterval(capabilityRefreshTimer);capabilityRefreshTimer=window.setInterval(refreshCapabilitiesOnFocus,30000);clearInterval(sessionPollTimer);sessionPollTimer=window.setInterval(()=>{if(paired.value&&online.value&&document.visibilityState==='visible')void loadSessions().catch(()=>{})},15000);openWs();void reconcilePending()}
-async function unpair(){manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);clearInterval(capabilityRefreshTimer);clearInterval(occupiedCheckTimer);clearInterval(sessionPollTimer);wasConnectedOnce=false;ws?.close();await api.revoke().catch(()=>{});await clearAuth(false);await clearLocalState();paired.value=false;settingsOpen.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[]}
-onAuthLost(()=>{manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);clearInterval(capabilityRefreshTimer);clearInterval(occupiedCheckTimer);clearInterval(sessionPollTimer);wasConnectedOnce=false;ws?.close();void clearLocalState();paired.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[];error.value='登录已过期，请重新配对'});
-onMounted(async()=>{applyTheme(theme.value);addEventListener('online',network);addEventListener('offline',network);addEventListener('visibilitychange',refreshCapabilitiesOnFocus);addEventListener('focus',refreshCapabilitiesOnFocus);await ensureAuth();let verified=false;if(hasAuth()){for(let attempt=0;attempt<3&&hasAuth();attempt++){if(attempt>0)await new Promise<void>(resolve=>setTimeout(resolve,800*(attempt+1)));verified=await ensureFreshToken();if(verified)break}}paired.value=verified;if(paired.value){await boot()}else{paired.value=false}});
-onBeforeUnmount(()=>{manualClose=true;removeEventListener('online',network);removeEventListener('offline',network);removeEventListener('visibilitychange',refreshCapabilitiesOnFocus);removeEventListener('focus',refreshCapabilitiesOnFocus);ws?.close();clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);clearInterval(capabilityRefreshTimer);clearInterval(occupiedCheckTimer);clearInterval(sessionPollTimer)});
+async function unpair(){manualClose=true;stopOfflineProbe();clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);clearInterval(capabilityRefreshTimer);clearInterval(occupiedCheckTimer);clearInterval(sessionPollTimer);wasConnectedOnce=false;ws?.close();await api.revoke().catch(()=>{});await clearAuth(false);await clearLocalState();paired.value=false;offlineMode.value=false;settingsOpen.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[]}
+onAuthLost(()=>{manualClose=true;clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);clearInterval(capabilityRefreshTimer);clearInterval(occupiedCheckTimer);clearInterval(sessionPollTimer);wasConnectedOnce=false;ws?.close();paired.value=false;sessions.value=[];selectionGeneration++;active.value=null;pending.value=[];error.value='登录已过期，请重新配对';void checkOfflineAvailability()});
+onMounted(async()=>{applyTheme(theme.value);addEventListener('online',network);addEventListener('offline',network);addEventListener('visibilitychange',refreshCapabilitiesOnFocus);addEventListener('focus',refreshCapabilitiesOnFocus);await ensureAuth();void checkOfflineAvailability();let verified=false;if(hasAuth()){for(let attempt=0;attempt<3&&hasAuth();attempt++){if(attempt>0)await new Promise<void>(resolve=>setTimeout(resolve,800*(attempt+1)));verified=await ensureFreshToken();if(verified)break}}paired.value=verified;if(paired.value){hasCache.value=false;await boot()}else{paired.value=false;await checkOfflineAvailability()}});
+onBeforeUnmount(()=>{manualClose=true;removeEventListener('online',network);removeEventListener('offline',network);removeEventListener('visibilitychange',refreshCapabilitiesOnFocus);removeEventListener('focus',refreshCapabilitiesOnFocus);ws?.close();clearTimeout(retryTimer);clearInterval(keepaliveTimer);clearTimeout(wsGraceTimer);clearTimeout(sessionRefreshTimer);clearInterval(capabilityRefreshTimer);clearInterval(occupiedCheckTimer);clearInterval(sessionPollTimer);stopOfflineProbe()});
 async function select(session:Session){
+  if(offlineMode.value){await selectOffline(session);return}
   const generation=++selectionGeneration;
   if(active.value?.session_id==='draft'&&session.session_id!=='draft')draftCwd.value='';
   ourTurnIds.value=new Set();
@@ -383,23 +389,60 @@ async function openPendingConversation(item:Pending){
   await select(target);
   jumpTarget.value={id:`local:${item.id}`,key:Date.now()};
 }
-async function cancel(){if(!active.value)return;try{await api.cancel(active.value.session_id)}catch(e){error.value=e instanceof Error?e.message:'停止失败'}activeTurn.value=false}
+async function cancel(){if(offlineMode.value||!active.value)return;try{await api.cancel(active.value.session_id)}catch(e){error.value=e instanceof Error?e.message:'停止失败'}activeTurn.value=false}
+
+// ---- Offline cached-access mode ----
+// Lets the mobile device view cached conversations without the local server running.
+// Uses IndexedDB sessions/messages/events that were synced while online. A local
+// PBKDF2-hashed password gates access so the cached data isn't readable by anyone
+// who picks up the phone.
+async function checkOfflineAvailability(){try{const [cache,password]=await Promise.all([hasOfflineCache(),hasOfflinePassword()]);hasCache.value=cache;offlineHasPassword.value=password}catch{hasCache.value=false;offlineHasPassword.value=false}}
+async function openOfflineUnlock(){offlineHasPassword.value=await hasOfflinePassword();offlineUnlockOpen.value=true;offlineError.value=''}
+async function doOfflineUnlock(password:string){offlineBusy.value=true;offlineError.value='';try{const existing=await hasOfflinePassword();if(!existing){if(!offlinePasswordIsValid(password)){offlineError.value='离线访问密码至少 8 位';return}await setOfflinePassword(password);offlineHasPassword.value=true}else{const ok=await verifyOfflinePassword(password);if(!ok){offlineError.value='离线访问密码错误';return}}await enterOfflineMode()}catch(e){offlineError.value=e instanceof Error?e.message:'无法进入离线模式'}finally{offlineBusy.value=false}}
+async function enterOfflineMode(){
+  offlineMode.value=true;offlineUnlockOpen.value=false;error.value='';
+  // Load everything from IndexedDB cache only — no server contact.
+  try{sessions.value=await db.sessions.orderBy('updated_at').reverse().toArray()}catch(cacheError){console.warn('[remote:offline] sessions load failed',cacheError);sessions.value=[]}
+  try{pending.value=await db.pending.toArray()}catch(cacheError){console.warn('[remote:offline] pending load failed',cacheError);pending.value=[]}
+  allowedCwds.value=[];projectList.value=[];sidebarOrder.value={};projectOrder.value=[];
+  if(sessions.value[0])await selectOffline(sessions.value[0]);
+  startOfflineProbe();
+}
+function exitOfflineMode(){stopOfflineProbe();offlineMode.value=false;sessions.value=[];active.value=null;messages.value=[];events.value=[];pending.value=[];void checkOfflineAvailability()}
+async function selectOffline(session:Session){
+  active.value=session;drawer.value=false;loadingThread.value=true;transitioning.value=true;messages.value=[];events.value=[];approvals.value=[];activeTurn.value=false;
+  if(session.session_id==='draft'){loadingThread.value=false;transitioning.value=false;return}
+  try{const [cachedMessages,cachedEvents]=await Promise.all([db.messages.where('session_id').equals(session.session_id).sortBy('seq'),db.events.where('session').equals(session.session_id).sortBy('seq')]);const projected=projectBridgeEvents(cachedMessages,cachedEvents);messages.value=messagesWithPending(projected.messages,session.session_id);events.value=projected.events;activeTurn.value=projected.activeTurn}catch(cacheError){console.warn('[remote:offline] thread load failed',cacheError)}
+  finally{loadingThread.value=false;transitioning.value=false}
+}
+// Periodically probe the last-known server URL. When it comes back, surface a
+// reconnect banner so the user can return to the full online mode.
+function startOfflineProbe(){stopOfflineProbe();offlineProbeTimer=window.setInterval(async()=>{if(!navigator.onLine)return;const base=currentServerUrl();if(!base)return;try{const r=await fetch(base+'/api/pair/methods',{headers:{'content-type':'application/json'}});if(r.ok)serverBack.value=true}catch{/* still down */}},10000)}
+function stopOfflineProbe(){clearInterval(offlineProbeTimer);offlineProbeTimer=undefined;serverBack.value=false}
+async function reconnectFromOffline(){
+  stopOfflineProbe();offlineMode.value=false;
+  await ensureAuth();let verified=false;
+  if(hasAuth()){verified=await ensureFreshToken()}
+  if(verified){paired.value=true;sessions.value=[];active.value=null;messages.value=[];events.value=[];await boot()}
+  else{paired.value=false;active.value=null;await checkOfflineAvailability()}
+}
 </script>
 
 <template>
-<PairingSurface v-if="!paired" :busy="pairBusy" :error="error" :initial-server="initialServer" @pair="doPair"/>
+<PairingSurface v-if="!paired&&!offlineUnlockOpen&&!offlineMode" :busy="pairBusy" :error="error" :initial-server="initialServer" :has-offline="hasCache" @pair="doPair" @offline="openOfflineUnlock"/>
+<OfflineUnlockSurface v-else-if="offlineUnlockOpen" :busy="offlineBusy" :error="offlineError" :has-password="offlineHasPassword" @unlock="doOfflineUnlock" @exit="offlineUnlockOpen=false"/>
 <AppShell v-else :drawer-open="drawer" :sidebar-hidden="sidebarHidden" @close="drawer=false" @toggle-sidebar="toggleSidebar">
-  <template #sidebar><SessionSidebar :sessions="sessions" :active-id="active?.session_id" :loading="loadingSessions" :error="error" :projects="projectList" :sidebar-order="sidebarOrder" :project-order="projectOrder" @select="select" @refresh="loadSessions(true)" @pin="pin" @archive="archive" @rename="renameSession" @create="createThread" @create-in-cwd="createInCwd" @manual-create="openManualCreate" :busy="creatingThread" @settings="settingsOpen=true"/></template>
+  <template #sidebar><SessionSidebar :sessions="sessions" :active-id="active?.session_id" :loading="loadingSessions" :error="error" :projects="projectList" :sidebar-order="sidebarOrder" :project-order="projectOrder" @select="select" @refresh="loadSessions(true)" @pin="pin" @archive="archive" @rename="renameSession" @create="createThread" @create-in-cwd="createInCwd" @manual-create="openManualCreate" :busy="creatingThread" :offline-mode="offlineMode" @settings="settingsOpen=true"/></template>
   <section class="thread-workspace">
-    <ConnectionBanner :online="online" :ws="wsState" :app-server="appServer" :pending="pendingCount" :server-offline="serverOffline" @open-outbox="outboxOpen=true"/>
-    <ThreadHeader :session="active" :active-turn="activeTurn" :occupied="occupied" @menu="drawer=true" @rename="rename" @review="approvalOpen=true"/>
+    <ConnectionBanner :online="online" :ws="wsState" :app-server="appServer" :pending="offlineMode?0:pendingCount" :server-offline="serverOffline" :offline="offlineMode" :server-back="serverBack" @open-outbox="outboxOpen=true" @reconnect="reconnectFromOffline"/>
+    <ThreadHeader :session="active" :active-turn="activeTurn" :occupied="occupied" :offline-mode="offlineMode" @menu="drawer=true" @rename="rename" @review="approvalOpen=true"/>
     <ConversationTimeline :messages="messages" :events="events" :loading="loadingThread" :pending-states="pendingStates" :pending-cancellable="pendingCancellable" :active-turn="activeTurn" :occupied="occupied" :jump-target="jumpTarget" @open-diff="openDiff" @edit-pending="openPendingEditor"/>
-    <ComposerBox :disabled="!active" :active-turn="activeTurn" :occupied="occupied" :online="online" :queued="pendingCount" :sending="sending" :models="models" :skills="skills" :apps="apps" :defaults="defaults" :capabilities-loading="capabilitiesLoading" :cwd="active?.cwd || ''" @load-capabilities="loadCapabilities" @send="queueMessage" @cancel="cancel"/>
+    <ComposerBox :disabled="!active||offlineMode" :active-turn="activeTurn" :occupied="occupied" :online="online" :queued="pendingCount" :sending="sending" :models="models" :skills="skills" :apps="apps" :defaults="defaults" :capabilities-loading="capabilitiesLoading" :offline-mode="offlineMode" :cwd="active?.cwd || ''" @load-capabilities="loadCapabilities" @send="queueMessage" @cancel="cancel"/>
   </section>
   <template #overlay>
     <ApprovalSheet :approvals="approvals" :open="approvalOpen" :busy-id="approvalBusy" @close="approvalOpen=false" @decide="decideApproval"/>
     <DiffViewer :open="diffOpen" :diff="diff" :title="diffTitle" @close="diffOpen=false"/>
-    <SettingsSurface :open="settingsOpen" :theme="theme" @close="settingsOpen=false" @theme="applyTheme" @unpair="unpair"/>
+    <SettingsSurface :open="settingsOpen" :theme="theme" :offline-mode="offlineMode" @close="settingsOpen=false" @theme="applyTheme" @unpair="unpair" @exit-offline="exitOfflineMode"/>
     <NewThreadDialog :open="newThreadOpen" :initial="active?.cwd||''" :busy="creatingThread" :error="createError" @close="newThreadOpen=false" @create="confirmCreate"/>
     <OutboxSheet :open="outboxOpen" :items="pending" :sessions="sessions" @close="outboxOpen=false" @open-conversation="openPendingConversation" @cancel="cancelQueued"/>
     <div v-if="editingPending" class="modal-scrim" @click.self="editingPending=null"><form class="pending-editor" @submit.prevent="savePendingEdit"><header><div><strong>编辑待发送消息</strong><small>发送会使用修改后的内容；取消该消息会将其从队列移除。</small></div><button type="button" class="icon-button" aria-label="关闭" @click="editingPending=null">×</button></header><textarea v-model="pendingEditorText" aria-label="待发送消息"></textarea><footer><button type="button" class="text-button danger-text" @click="cancelPendingMessage">取消该消息</button><span></span><button type="button" class="text-button" @click="editingPending=null">取消编辑</button><button class="primary" :disabled="!pendingEditorText.trim()">发送修改</button></footer></form></div>

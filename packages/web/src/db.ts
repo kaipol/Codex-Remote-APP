@@ -15,10 +15,27 @@ export async function cursor(){try{return Number((await db.meta.get('cursor'))?.
 export async function setCursor(value:number){try{await db.meta.put({key:'cursor',value:String(value)})}catch(error){console.warn('[remote:db] cursor write failed',error)}}
 export async function streamId(){try{return (await db.meta.get('stream_id'))?.value||''}catch(error){console.warn('[remote:db] stream id read failed',error);return ''}}
 export async function setStreamId(value:string){try{if(value)await db.meta.put({key:'stream_id',value})}catch(error){console.warn('[remote:db] stream id write failed',error)}}
+export async function getMeta(key:string):Promise<string|undefined>{try{return (await db.meta.get(key))?.value}catch(error){console.warn('[remote:db] meta read failed',error);return undefined}}
+export async function setMeta(key:string,value:string):Promise<void>{try{await db.meta.put({key,value})}catch(error){console.warn('[remote:db] meta write failed',error)}}
+export async function deleteMeta(key:string):Promise<void>{try{await db.meta.delete(key)}catch(error){console.warn('[remote:db] meta delete failed',error)}}
+// Returns true when there are cached sessions worth unlocking offline.
+export async function hasOfflineCache():Promise<boolean>{try{return(await db.sessions.count())>0}catch(error){console.warn('[remote:db] offline cache check failed',error);return false}}
+
 export async function clearLocalState(){
   try{
     await db.transaction('rw',db.sessions,db.messages,db.events,db.pending,db.meta,async()=>{
       await Promise.all([db.sessions.clear(),db.messages.clear(),db.events.clear(),db.pending.clear(),db.meta.clear()]);
+    });
+  }catch(error){console.warn('[remote:db] local state clear failed',error)}
+}
+// Like clearLocalState but preserves local-only credentials stored in meta (the
+// offline access password). Use this on re-pair/reconnect so the user does not
+// have to set the offline password again; clearLocalState stays reserved for an
+// explicit unpair that should wipe every device-local secret.
+export async function clearTransportState(){
+  try{
+    await db.transaction('rw',db.sessions,db.messages,db.events,db.pending,db.meta,async()=>{
+      await Promise.all([db.sessions.clear(),db.messages.clear(),db.events.clear(),db.pending.clear(),db.meta.delete('cursor'),db.meta.delete('stream_id')]);
     });
   }catch(error){console.warn('[remote:db] local state clear failed',error)}
 }

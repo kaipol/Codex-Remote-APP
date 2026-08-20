@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { AppOption, CodexDefaults, FileSearchResult, ModelOption, ReasoningEffort, RuntimeConfig, SkillOption, UserInput } from '@remote/shared';
 import { api } from '../api';
 
-const props = defineProps<{ disabled: boolean; activeTurn: boolean; occupied?: boolean; online: boolean; queued: number; sending: boolean; models: ModelOption[]; skills: SkillOption[]; apps: AppOption[]; defaults: CodexDefaults; capabilitiesLoading: boolean; cwd: string }>();
+const props = defineProps<{ disabled: boolean; activeTurn: boolean; occupied?: boolean; online: boolean; queued: number; sending: boolean; models: ModelOption[]; skills: SkillOption[]; apps: AppOption[]; defaults: CodexDefaults; capabilitiesLoading: boolean; offlineMode?: boolean; cwd: string }>();
 const emit = defineEmits<{ send: [payload: { text: string; input: UserInput[]; runtime: RuntimeConfig }]; cancel: []; loadCapabilities: [] }>();
 const root = ref<HTMLElement>();
 const text = ref('');
@@ -281,7 +281,7 @@ function slashDesc(cmd: SlashCommand) { return cmd.kind === 'skill' ? (cmd.item.
         <p v-if="!mentionQuery">输入 @ 后跟文件名搜索当前项目文件</p>
       </div>
 
-      <textarea ref="input" v-model="text" rows="1" :disabled="disabled" :placeholder="disabled ? '选择会话后输入' : occupied ? '正被本机 Codex 占用，等待回复结束后即可发送…' : '给 Codex 发送消息…  / 命令  @ 引用文件'" aria-label="消息" @keydown="keydown" @input="onInput" @paste="onPaste"></textarea>
+      <textarea ref="input" v-model="text" rows="1" :disabled="disabled" :placeholder="offlineMode ? '离线模式 · 历史只读' : disabled ? '选择会话后输入' : occupied ? '正被本机 Codex 占用，等待回复结束后即可发送…' : '给 Codex 发送消息…  / 命令  @ 引用文件'" aria-label="消息" @keydown="keydown" @input="onInput" @paste="onPaste"></textarea>
       <input ref="fileInput" type="file" multiple hidden @change="files">
       <div class="composer-tools">
         <div class="composer-anchor composer-add-anchor">

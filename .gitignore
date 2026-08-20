@@ -12,7 +12,7 @@ packages/web/public/workbox-*.js
 .DS_Store
 *.tsbuildinfo
 __pycache__/
-yepanywhere/
+
 
 # Backup files
 *.bak

@@ -86,6 +86,34 @@ describe('WebSocket origin validation', () => {
     await waitFor(() => messages.some(message => message.type === 'capabilities'));
     expect(messages.find(message => message.type === 'capabilities')?.capabilities).toEqual(['models','defaults']);
   });
+
+  it('allows the Capacitor Android https localhost origin', async () => {
+    const root = process.cwd();
+    const config = loadConfig({
+      databasePath: ':memory:', secret: 'x'.repeat(32),
+      codexCommand: process.execPath,
+      codexArgs: [join(root, 'src/test-fixtures/fake-app-server.mjs')],
+      appServerCwd: root, codexCwdAllowlist: [root], codexRequestTimeoutMs: 1000,
+    });
+    store = new Store(':memory:');
+    const auth = new AuthService(store, config);
+    sessions = new SessionService(store, config);
+    server = createServer(createApp(store, auth, sessions, config));
+    const stream = attachWs(server, auth, store, config.corsOrigins);
+    streams.push(stream);
+    await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    const tokens = auth.pair(auth.createPairCode().code, 'capacitor-android-test')!;
+    const socket = new WebSocket('ws://127.0.0.1:' + port + '/ws?token=' + encodeURIComponent(tokens.access_token), {
+      headers: { Origin: 'https://localhost' },
+    });
+    sockets.push(socket);
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', resolve);
+      socket.once('error', reject);
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
 });
 
 describe('remote message stream', () => {

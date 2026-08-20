@@ -13,7 +13,7 @@ afterEach(async () => {
   root = '';
 });
 
-it('uses only the provider /v1/models list when it responds', async () => {
+it('merges the provider /v1/models list with the configured catalog', async () => {
   root = join(tmpdir(), 'codex-provider-models-' + Date.now() + '-' + Math.random());
   await mkdir(join(root, 'model-catalogs'), { recursive: true });
   const fetchMock = vi.fn().mockResolvedValue({
@@ -23,8 +23,6 @@ it('uses only the provider /v1/models list when it responds', async () => {
   vi.stubGlobal('fetch', fetchMock);
   process.env.TEST_MODEL_TOKEN = 'token';
 
-  // Built-in catalog entries must not leak into the picker when the provider
-  // successfully reports the models it actually serves.
   await writeFile(join(root, 'model-catalogs', 'selected.json'), JSON.stringify({ models: [{ slug: 'catalog-only' }] }));
   await writeFile(join(root, 'config.toml'), [
     'model_catalog_json = "selected.json"',
@@ -35,6 +33,7 @@ it('uses only the provider /v1/models list when it responds', async () => {
     'env_key = "TEST_MODEL_TOKEN"',
   ].join('\n'));
   await expect(discoverModels(root)).resolves.toEqual([
+    expect.objectContaining({ model: 'catalog-only' }),
     expect.objectContaining({ model: 'gpt-provider' }),
     expect.objectContaining({ model: 'gpt-secondary', displayName: 'Secondary' }),
   ]);
@@ -58,7 +57,7 @@ it('uses only the provider /v1/models list when it responds', async () => {
   expect(fetchMock.mock.calls[0][1]).toMatchObject({ headers: { authorization: 'Bearer token' } });
 });
 
-it('returns no models when a configured provider list is empty', async () => {
+it('falls back to the configured catalog when the provider list is empty', async () => {
   root = join(tmpdir(), 'codex-provider-models-' + Date.now() + '-' + Math.random());
   await mkdir(join(root, 'model-catalogs'), { recursive: true });
   const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) });
@@ -74,5 +73,7 @@ it('returns no models when a configured provider list is empty', async () => {
     'base_url = "https://models.example/v1"',
     'env_key = "TEST_MODEL_TOKEN"',
   ].join('\n'));
-  await expect(discoverModels(root)).resolves.toEqual([]);
+  await expect(discoverModels(root)).resolves.toEqual([
+    expect.objectContaining({ model: 'catalog-only' }),
+  ]);
 });

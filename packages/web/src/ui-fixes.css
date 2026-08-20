@@ -1022,6 +1022,12 @@ label > .password-toggle:hover { background: var(--surface-strong); color: var(-
 .password-input .text-button { flex: none; height: 40px; align-self: center; }
 .form-ok { margin: 2px 0 0; color: var(--accent); font-size: 12px; }
 
+/* Offline cached-access mode */
+.offline-entry { width: 100%; margin-top: 10px; padding: 10px; border: 1px solid color-mix(in srgb,var(--accent) 30%,var(--line)); border-radius: var(--radius-m); background: var(--accent-soft); color: var(--accent); font-size: 14px; font-weight: 520; }
+.offline-entry:hover { background: color-mix(in srgb,var(--accent) 14%,var(--accent-soft)); }
+.exit-offline { width: 100%; margin-top: 10px; padding: 10px; font-size: 14px; }
+.connection-banner .connection-outbox { border: 1px solid color-mix(in srgb,currentColor 30%,transparent); border-radius: 6px; padding: 3px 9px; font-size: 11px; }
+
 .approval-sheet {
   width: min(620px, calc(100vw - 40px)) !important;
   max-height: min(78dvh, 720px) !important;
@@ -1039,6 +1045,55 @@ label > .password-toggle:hover { background: var(--surface-strong); color: var(-
 }
 .message-row.assistant .message-stack {
   max-width: min(100%, 1040px) !important;
+}
+
+/* Keep unbreakable KaTeX output inside the message column on narrow screens. */
+.message-row,
+.message-stack,
+.assistant-turn-content,
+.message-bubble,
+.markdown {
+  min-width: 0;
+}
+.assistant-turn-content,
+.message-bubble,
+.markdown {
+  max-width: 100%;
+}
+.markdown .katex-display {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 6px;
+  overscroll-behavior-inline: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.markdown .katex-display > .katex {
+  width: max-content;
+  min-width: 100%;
+}
+.markdown :not(.katex-display) > .katex {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  vertical-align: middle;
+  overscroll-behavior-inline: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.markdown .katex-display::-webkit-scrollbar,
+.markdown :not(.katex-display) > .katex::-webkit-scrollbar {
+  height: 6px;
+}
+.markdown .katex-display::-webkit-scrollbar-thumb,
+.markdown :not(.katex-display) > .katex::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--line-strong);
 }
 
 /* Pasted image attachments should be visible before sending, like user images. */

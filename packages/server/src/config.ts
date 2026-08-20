@@ -34,7 +34,7 @@ export function loadConfig(overrides:Partial<Config>={}):Config {
  const rawAllowlist=process.env.CODEX_CWD_ALLOWLIST?.split(process.platform==='win32'?';':':').map(x=>x.trim()).filter(Boolean);
  const allowlist=rawAllowlist&&rawAllowlist.length?rawAllowlist:[process.cwd(),homedir()];
  const args=parseCodexArgs(process.env.CODEX_ARGS);
- const corsOrigins=process.env.CORS_ORIGINS?.split(',').map(x=>x.trim()).filter(Boolean)??['http://localhost:5173','http://127.0.0.1:5173','http://localhost','capacitor://localhost'];
+ const corsOrigins=process.env.CORS_ORIGINS?.split(',').map(x=>x.trim()).filter(Boolean)??['http://localhost:5173','http://127.0.0.1:5173','http://localhost','https://localhost','capacitor://localhost'];
  const base:Config={host:process.env.HOST||'0.0.0.0',port:Number(process.env.PORT||8787),databasePath,pairTtl:Number(process.env.PAIR_CODE_TTL_SECONDS||300),accessTtl:Number(process.env.ACCESS_TOKEN_TTL_SECONDS||1800),refreshDays:Number(process.env.REFRESH_TOKEN_TTL_DAYS||30),secret,codexHome,codexSessionsDir:process.env.CODEX_SESSIONS_DIR||join(codexHome,'sessions'),codexCommand:process.env.CODEX_COMMAND||'codex',codexArgs:args,codexCwdAllowlist:allowlist,appServerCwd:process.env.CODEX_APP_SERVER_CWD||process.cwd(),codexRequestTimeoutMs:Number(process.env.CODEX_REQUEST_TIMEOUT_MS||30000),corsOrigins,allowDangerFullAccess:process.env.ALLOW_DANGER_FULL_ACCESS!=='false',pairPassword:overrides.pairPassword??process.env.PAIR_PASSWORD??'',pairEcdhPrivateKey:ecdhKeys.privateKey,pairEcdhPublicKey:ecdhKeys.publicKey};
  return {...base,...overrides,databasePath,secret};
 }
